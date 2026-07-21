@@ -36,9 +36,12 @@ setup/wiring/troubleshooting.
   `-7d-utilization`) of a minimal `max_tokens:1` POST, not a JSON body -
   `ArduinoJson` was a dependency early on and was dropped once this was
   confirmed (see the comment in `firmware/platformio.ini`).
-- LCD is a 16x2/20x4 HD44780 over a PCF8574 I2C backpack; firmware
-  auto-scans the I2C bus for the backpack's address (`scanForLcdAddress()`
-  in `main.cpp`) rather than hardcoding `0x27` vs `0x3F`.
+- LCD is HD44780 over a PCF8574 I2C backpack; firmware auto-scans the I2C
+  bus for the backpack's address (`scanForLcdAddress()` in `main.cpp`)
+  rather than hardcoding `0x27` vs `0x3F`. This device's actual LCD is
+  18x2 (`LCD_COLS`/`LCD_ROWS` default) - 16x2/20x4 also work by changing
+  those two constants; `BAR_WIDTH` derives from `LCD_COLS` so the bar
+  always fills the row exactly, see below.
 - `render()` only touches the I2C bus when something actually changed.
   Row 0 (label + bar) is tracked by a small change-detection key
   (`renderedRow0Key`) rather than literal text, since the bar's on-screen
@@ -62,9 +65,12 @@ about this device is latency-sensitive) not an overlooked bug.
 Screens 0/1 ("5H"/"WK" detail, designed with `lcd_editor.html` - see
 below) are each 2 rows:
 
-- Row 0: label + a fixed `BAR_WIDTH`-cell (10) bar graph of the
-  percentage, drawn with `drawBar()`, plus a decorative sparkle
-  (`LOGO_CHAR`) in the spare columns to the right of the bar.
+- Row 0: label + a `BAR_WIDTH`-cell bar graph of the percentage, drawn
+  with `drawBar()`, plus a decorative sparkle (`LOGO_CHAR`). `BAR_WIDTH`
+  is `LCD_COLS - 5` (not a fixed number) so `"<label> <bar> <sparkle>"`
+  (2 + 1 + BAR_WIDTH + 1 + 1) always totals exactly `LCD_COLS` - the bar
+  fills whatever's left over instead of leaving unused columns, whatever
+  LCD_COLS is set to.
 - Row 1: the exact percentage as a number, plus a time detail:
   - Screen 0 ("5H"): `formatCountdown()` - a relative "3H12M" countdown to
     when the 5-hour window resets (screen 0's `render()` branch appends
@@ -94,18 +100,23 @@ rotation needed for a quick glance: `"5H<pct> <countdown>"` /
 - No bar graphs (no room) and no stale/`!` marker - this screen trades
   those for compactness; check the dedicated screens for that detail.
 
-CGRAM (8 slots, 0-7) is now fully allocated:
+CGRAM (8 slots, 0-7) is now down to 1 free slot:
 - 0: full-block (`FULL_BLOCK_CHAR`) - bar cells that are completely filled.
 - 1-4: partial-fill glyphs (`PARTIAL_FILL_CHARS`, 1-4 of `BAR_SUBDIV`=5
   columns lit) - only the one bar cell straddling the fill boundary ever
   uses one of these; `drawBar()` computes `filledUnits` in units of
   1/`BAR_SUBDIV` of a cell rather than whole cells, for
-  `BAR_WIDTH * BAR_SUBDIV` (50) distinct bar levels instead of just 10.
+  `BAR_WIDTH * BAR_SUBDIV` distinct bar levels instead of just `BAR_WIDTH`.
 - 5: `LOGO_CHAR`, a small original sparkle/starburst (not a reproduction
   of any real logo - 5x8 monochrome pixels can't meaningfully do that
-  anyway), shown on the boot splash (`"ClaudeMeter <sparkle>"` in
-  `setup()`, before WiFi connects) and at the end of row 0 on screens 0/1.
-- 6-7: unused.
+  anyway), shown on the boot splash (`"Claude <sparkle>"` / `"Desktop
+  Display"`, two rows, in `setup()` before WiFi connects) and at the end
+  of row 0 on screens 0/1.
+- 6: `EMPTY_CELL_CHAR`, a hollow-rectangle outline - `drawBar()` writes
+  this instead of a plain space for any cell with 0 units filled, so the
+  bar's full width (its "empty slot" boundary) stays visible even at 0%,
+  not just once something's filled.
+- 7: the last free slot.
 
 This depends on two things that didn't exist before this design:
 
@@ -193,12 +204,14 @@ This is the part most likely to surprise a future reader:
 - `REFRESH_INTERVAL_MS` (120s) hits the real Anthropic Messages API every
   poll - don't lower this aggressively, it's a real (if minimal,
   `max_tokens=1`) request against production rate limits.
-- `PIN_SCREEN_BUTTON` defaults to GPIO6, picked specifically to avoid
-  ESP32-C3's strapping pins (GPIO2/8/9 - GPIO9 in particular is the same
-  pin as the BOOT button on most boards; wiring a second button there
-  wouldn't break normal runtime presses, but it's a needless landmine for
-  reset/download-mode behavior). If GPIO6 isn't broken out on a given
-  board variant, prefer another non-strapping, non-SDA/SCL pin over GPIO9.
+- `PIN_SCREEN_BUTTON` is GPIO7. GPIO6 was tried first (also chosen to
+  avoid ESP32-C3's strapping pins GPIO2/8/9 - GPIO9 in particular is the
+  same pin as the BOOT button on most boards) but didn't work on this
+  device's actual board for reasons not root-caused (could be a
+  board-specific pinout difference, could be wiring - not confirmed
+  either way); switched to GPIO7 on the user's instruction rather than
+  debugging further. If GPIO7 ever needs to change again, GPIO3 or GPIO10
+  are the next things to try - avoid SDA/SCL and the strapping pins.
 
 ## Naming note
 

@@ -13,21 +13,21 @@
 #include "certs.h"
 
 // ---- Display size ----
-// Most common size is 16x2. If you have a 20x4 display, just change these
-// two - row text is short and left-aligned either way, so it just leaves
-// more blank space on a wider line rather than needing layout changes.
-#define LCD_COLS 16
+// This device's actual LCD is 18x2. 16x2 and 20x4 also work - just change
+// these two; BAR_WIDTH below scales to fill whatever width is set, so the
+// bar always uses the full row instead of leaving it partly blank.
+#define LCD_COLS 18
 #define LCD_ROWS 2
 
 // Wiring: SDA -> GPIO4, SCL -> GPIO5
 #define PIN_SDA 4
 #define PIN_SCL 5
 
-// Wiring: one leg to GPIO6, the other to GND. Uses the internal pull-up
-// (no external resistor needed). Change this if your board doesn't break
-// out GPIO6 - anything free that isn't SDA/SCL or a strapping pin
-// (GPIO2/8/9 on ESP32-C3) works.
-#define PIN_SCREEN_BUTTON 6
+// Wiring: one leg to GPIO7, the other to GND. Uses the internal pull-up
+// (no external resistor needed). GPIO6 didn't work on this board (tried
+// first); if GPIO7 also doesn't, try GPIO3 or GPIO10 next - avoid SDA/SCL
+// and strapping pins (GPIO2/8/9 on ESP32-C3).
+#define PIN_SCREEN_BUTTON 7
 #define BUTTON_DEBOUNCE_MS 250UL
 
 // This calls the real Anthropic API every poll, so don't hammer it. 120s
@@ -41,9 +41,10 @@
 #define SCREEN_ROTATE_MS 4000UL
 #define SCREEN_COUNT 3
 
-// Width, in LCD cells, of the usage bar on row 0 - fixed regardless of
-// LCD_COLS, matching the layout designed in lcd_editor.html.
-#define BAR_WIDTH 10
+// Width, in LCD cells, of the usage bar on row 0 - scales to use every
+// column: row 0 is "<label> <bar> <logo>", i.e. 2 (label) + 1 (gap) +
+// BAR_WIDTH + 1 (gap) + 1 (logo) = LCD_COLS exactly, whatever LCD_COLS is.
+#define BAR_WIDTH (LCD_COLS - 5)
 
 // Sub-cell fill steps per bar cell (5 = one HD44780 glyph column each),
 // for finer resolution than a plain filled/empty cell would give -
@@ -72,12 +73,14 @@
 LiquidCrystal_I2C *lcd = nullptr;
 Esp32WifiFix wifiFix;
 
-// CGRAM has 8 slots (0-7). Bar uses 0 (full) + 1-4 (partial fill, 1-4 of
-// 5 columns lit - see BAR_SUBDIV); 5 is a small decorative sparkle, used
-// on the boot splash and tucked into spare columns on the detail screens.
-// 6-7 are free.
+// CGRAM has 8 slots (0-7), all spoken for: 0 (full) + 1-4 (partial fill,
+// 1-4 of 5 columns lit - see BAR_SUBDIV) + 5 (decorative sparkle, boot
+// splash + detail-screen row 0) + 6 (bordered empty cell, so a 0%-filled
+// bar still shows a visible slot outline instead of going totally blank).
+// 7 is the last free one.
 static const byte FULL_BLOCK_CHAR = 0;
 static const byte LOGO_CHAR = 5;
+static const byte EMPTY_CELL_CHAR = 6;
 // PARTIAL_FILL_CHARS[i] = the glyph for (i+1) of BAR_SUBDIV columns lit,
 // i.e. index 0..3 -> CGRAM slots 1..4 (5/5 lit reuses FULL_BLOCK_CHAR
 // instead of a 5th glyph, since that's already an all-columns-lit block).
@@ -97,6 +100,11 @@ static byte partialFillGlyphs[BAR_SUBDIV - 1][8] = {
 // reproduce one anyway) - just a small "something's sparkly here" touch.
 static byte logoGlyph[8] = {
     0b01010, 0b00100, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0b00100,
+};
+// A hollow rectangle - top/bottom border plus side rails, empty middle -
+// so an empty bar cell reads as "an empty slot" rather than truly blank.
+static byte emptyCellGlyph[8] = {
+    0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111,
 };
 
 int sessionUtilization = -1;  // 5-hour usage %, -1 = no data yet
@@ -178,9 +186,9 @@ uint8_t scanForLcdAddress() {
 
 // Draws a fixed BAR_WIDTH-cell bar starting at (col, row) with BAR_SUBDIV
 // levels of resolution per cell (partial-fill glyphs for the one cell
-// straddling the fill boundary, full/blank for the rest). Always paints
-// every cell in that range, so a shrinking percentage can't leave stale
-// filled cells behind from a previous, larger reading.
+// straddling the fill boundary, full/bordered-empty for the rest). Always
+// paints every cell in that range, so a shrinking percentage can't leave
+// stale filled cells behind from a previous, larger reading.
 void drawBar(int row, int col, int percent) {
   percent = constrain(percent, 0, 100);
   int filledUnits = (percent * BAR_WIDTH * BAR_SUBDIV + 50) / 100;
@@ -188,7 +196,7 @@ void drawBar(int row, int col, int percent) {
   for (int i = 0; i < BAR_WIDTH; i++) {
     int cellUnits = filledUnits - i * BAR_SUBDIV;
     if (cellUnits <= 0) {
-      lcd->write(' ');
+      lcd->write(EMPTY_CELL_CHAR);
     } else if (cellUnits >= BAR_SUBDIV) {
       lcd->write(FULL_BLOCK_CHAR);
     } else {
@@ -540,10 +548,15 @@ void setup() {
     lcd->createChar(PARTIAL_FILL_CHARS[i], partialFillGlyphs[i]);
   }
   lcd->createChar(LOGO_CHAR, logoGlyph);
+  lcd->createChar(EMPTY_CELL_CHAR, emptyCellGlyph);
 
   lcd->setCursor(0, 0);
-  lcd->print("ClaudeMeter ");
+  lcd->print("Claude ");
   lcd->write(LOGO_CHAR);
+  if (LCD_ROWS > 1) {
+    lcd->setCursor(0, 1);
+    lcd->print("Desktop Display");
+  }
   delay(800);
 
   // STA mode, stale-NVS-cache clear, defensive HT20 bandwidth - see

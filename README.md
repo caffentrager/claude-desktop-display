@@ -25,8 +25,9 @@ this project's original inspiration, does).
 ## Hardware
 
 - An ESP32-C3 board (any variant - DevKitM-1, "SuperMini", Xiao ESP32C3, ...)
-- A character LCD (16x2 or 20x4) with a **PCF8574 I2C backpack** (the common
-  4-pin GND/VCC/SDA/SCL modules)
+- A character LCD with a **PCF8574 I2C backpack** (the common 4-pin
+  GND/VCC/SDA/SCL modules) - 18x2, 16x2, and 20x4 all work, see
+  `LCD_COLS`/`LCD_ROWS` in `firmware/src/main.cpp`
 - A momentary push button (optional - manually switches screens; without
   it the display just rotates on its own)
 - Jumper wires
@@ -40,9 +41,9 @@ this project's original inspiration, does).
 | SDA | GPIO4 |
 | SCL | GPIO5 |
 
-Button (optional): one leg to **GPIO6**, the other to **GND**. No resistor
+Button (optional): one leg to **GPIO7**, the other to **GND**. No resistor
 needed - the firmware uses the pin's internal pull-up. If your board
-doesn't break out GPIO6, change `PIN_SCREEN_BUTTON` in `main.cpp` to any
+doesn't break out GPIO7, change `PIN_SCREEN_BUTTON` in `main.cpp` to any
 free pin that isn't SDA/SCL or a strapping pin (GPIO2/8/9 on ESP32-C3).
 
 > Most PCF8574 backpacks and the HD44780 LCD they drive want 5V for a bright
@@ -82,15 +83,13 @@ pio device monitor
 ```
 
 The serial monitor shows the LCD's detected I2C address, WiFi connection
-progress, and each poll's HTTP status. If your LCD is 20x4 instead of 16x2,
-change `LCD_COLS` / `LCD_ROWS` at the top of `firmware/src/main.cpp` - each
-row's text is short and left-aligned either way, so a wider display just
-shows it with extra blank space on the right rather than needing layout
-changes.
+progress, and each poll's HTTP status. If your LCD isn't 18x2, change
+`LCD_COLS` / `LCD_ROWS` at the top of `firmware/src/main.cpp` - the usage
+bar automatically widens or narrows to fill whatever width you set.
 
-On first power-up you'll briefly see a "ClaudeMeter ✳" splash (the ✳ is a
-small custom sparkle character, not a reproduction of any real logo) before
-it moves on to connecting WiFi.
+On first power-up you'll briefly see a two-line "Claude ✳" / "Desktop
+Display" splash (the ✳ is a small custom sparkle character, not a
+reproduction of any real logo) before it moves on to connecting WiFi.
 
 That's it - no bridge script, no second machine to keep running.
 
@@ -101,12 +100,12 @@ The screen cycles through three views every few seconds
 to the next one immediately instead of waiting:
 
 ```
-5H [███░░░░░░░] ✳
+5H █████▢▢▢▢▢▢▢▢ ✳
 42% 3H12M Left
 ```
 
 ```
-WK [██████░░░░] ✳
+WK █████████▢▢▢▢ ✳
 67% Fri 19:00
 ```
 
@@ -114,6 +113,10 @@ WK [██████░░░░] ✳
 5H42% 3H12M
 WK67% Fri 19:00
 ```
+
+(`▢` is the bordered "empty slot" glyph, not blank space - it marks the
+bar's boundary even at 0%. The bar's actual resolution is finer than
+whole cells - see below.)
 
 - **5H** - utilization of your rolling 5-hour session limit, with a
   countdown to when it resets
@@ -127,7 +130,9 @@ WK67% Fri 19:00
   dedicated 5H/WK screens if you need those.
 - The bar itself has finer-than-one-cell resolution (`BAR_SUBDIV` in
   `main.cpp`, 5 sub-steps per cell) using a few extra custom characters,
-  not just filled/empty blocks.
+  not just filled/empty blocks - and unfilled cells show a bordered
+  outline instead of going blank, so the bar's full width stays visible
+  even at 0%.
 - A trailing `!` on row 2 means the device hasn't gotten a good reading in
   a while (WiFi hiccup, API timeout, etc.) - the last known values stay on
   screen.
