@@ -39,47 +39,54 @@ setup/wiring/troubleshooting.
 - LCD is a 16x2/20x4 HD44780 over a PCF8574 I2C backpack; firmware
   auto-scans the I2C bus for the backpack's address (`scanForLcdAddress()`
   in `main.cpp`) rather than hardcoding `0x27` vs `0x3F`.
-- `render()` only touches the I2C bus when a value actually changed
-  (`renderedSession`/`renderedWeekly`/`renderedStale`/`renderedAuthFailed`
-  tracking) - avoids visible flicker every `loop()` tick.
+- `render()` only touches the I2C bus when something actually changed.
+  Row 0 (label + bar) is tracked by a small change-detection key
+  (`renderedRow0Key`) rather than literal text, since the bar's on-screen
+  bytes (a mix of a custom CGRAM character and spaces) aren't representable
+  as a normal C string; row 1 is plain text, tracked in `renderedRow1` the
+  straightforward way.
 
-## Display: rotating screens, not a static dashboard
+## Display: rotating 5H/WK screens, each with a bar + a time detail
 
 The LCD alternates between two screens (`currentScreen` in `main.cpp`,
-flipped every `SCREEN_ROTATE_MS` from `loop()`) instead of showing both
-metrics at once with bar graphs, which is what an earlier version of this
-firmware did:
+flipped every `SCREEN_ROTATE_MS` from `loop()`) - designed with
+`lcd_editor.html` (see below). Each screen is 2 rows:
 
-- Screen 0 ("5H"): percent + `formatCountdown()` - a relative "3H12M Left"
-  countdown to when the 5-hour window resets. Relative makes sense for a
-  short window.
-- Screen 1 ("WK"): percent + `formatResetDay()` - an absolute "Fri 04:00"
-  (UTC weekday + time) for when the 7-day window resets. Absolute makes
-  more sense than a multi-day countdown here.
+- Row 0: `"5H"`/`"WK"` label + a fixed `BAR_WIDTH`-cell (10) bar graph of
+  the percentage, drawn with `drawBar()` using a custom full-block CGRAM
+  glyph (`FULL_BLOCK_CHAR`).
+- Row 1: the exact percentage as a number, plus a time detail:
+  - Screen 0 ("5H"): `formatCountdown()` - a relative "3H12M Left"
+    countdown to when the 5-hour window resets. Relative reads better for
+    a short window.
+  - Screen 1 ("WK"): `formatResetDay()` - an absolute "Fri 04:00" (UTC
+    weekday + time) for when the 7-day window resets. Absolute reads
+    better than a multi-day countdown.
 
 This depends on two things that didn't exist before this design:
 
-1. **NTP time sync** (`configTime(0, 0, ...)` in `setup()`) - the device
-   needs real wall-clock time to compute either screen. Before SNTP
+1. **NTP time sync** (`configTime(0, 0, ...)` in `setup()`) - only
+   `formatCountdown()` (the 5H screen) needs this, since it needs the
+   device's own current time to compute a remaining duration.
+   `formatResetDay()` does NOT need it - `gmtime_r()` just decodes the
+   API-provided timestamp itself, independent of "now". Before SNTP
    finishes (a few seconds after WiFi comes up), `time(nullptr)` is
    near-epoch; `formatCountdown()` guards against this by refusing to show
    a countdown longer than 6 hours (a correctly-synced 5h window should
    never read more than that), falling back to `--` instead of a
    multi-year garbage duration.
-2. **Two new response headers**: `anthropic-ratelimit-unified-5h-reset`
-   and `-7d-reset`, assumed to be ISO8601 UTC strings (parsed by
-   `parseIso8601Utc()`) by analogy with Anthropic's other `-reset`
-   rate-limit headers. **This assumption has not been confirmed against a
-   live API response** - if a screen always shows `--` for the time
-   instead of a real value even once utilization itself is populated and
-   NTP has clearly synced, print `r5`/`r7` in `fetchUsage()` to Serial and
-   check the actual header name/format first.
-3. `mktime()` is used instead of `timegm()` to convert the parsed UTC
-   `struct tm` to a `time_t` - esp32-arduino's newlib doesn't provide
-   `timegm()`. This only gives a correct UTC result because `configTime()`
-   was called with a 0 UTC offset, making the device's "local" time UTC;
-   don't reuse `parseIso8601Utc()` verbatim in a project that sets a
-   nonzero `configTime()` offset.
+2. **Two extra response headers**: `anthropic-ratelimit-unified-5h-reset`
+   and `-7d-reset`. **Confirmed on real hardware on 2026-07-21** (flashed
+   to the board at `/dev/ttyACM0`, MAC `1C:DB:D4:3B:E2:88`, and read back
+   over serial) to be **plain base-10 Unix timestamps** (e.g.
+   `"1784652600"`), parsed by `parseResetEpoch()` (`strtol`, no string
+   parsing needed). An earlier version of this code guessed these were
+   ISO8601 strings like `"2026-07-22T01:00:00Z"` and shipped a
+   `sscanf`/`mktime()`-based parser for that format - wrong guess, replaced
+   once real data was captured. If a future Anthropic API change alters
+   this format again, `fetchUsage()` logs the raw header text every poll
+   (`[API] 5h=... reset5h='...' 7d=... reset7d='...'`), so check that
+   first rather than re-guessing.
 
 ## WiFi reliability: this project corrected esp32-wifi-fix-kit upstream
 

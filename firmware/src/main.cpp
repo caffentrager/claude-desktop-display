@@ -32,6 +32,10 @@
 // The two screens (5-hour detail, weekly detail) alternate on this interval.
 #define SCREEN_ROTATE_MS 4000UL
 
+// Width, in LCD cells, of the usage bar on row 0 - fixed regardless of
+// LCD_COLS, matching the layout designed in lcd_editor.html.
+#define BAR_WIDTH 10
+
 // Same endpoint/headers/probe model Claude Code itself uses when checking
 // rate limits - see https://github.com/oauramos/claude-usage-stick.
 #define MESSAGES_ENDPOINT "https://api.anthropic.com/v1/messages"
@@ -49,6 +53,11 @@
 LiquidCrystal_I2C *lcd = nullptr;
 Esp32WifiFix wifiFix;
 
+static const byte FULL_BLOCK_CHAR = 0;
+static byte fullBlockGlyph[8] = {
+    0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111,
+};
+
 int sessionUtilization = -1;  // 5-hour usage %, -1 = no data yet
 int weeklyUtilization = -1;   // 7-day (week) usage %, -1 = no data yet
 time_t sessionResetEpoch = 0; // unix time the 5h window resets, 0 = unknown
@@ -62,9 +71,12 @@ unsigned long lastContactMs = 0;
 int currentScreen = 0;  // 0 = 5H detail, 1 = WK detail
 unsigned long lastScreenSwitchMs = 0;
 
-// Tracks what's currently on screen so we only touch the I2C bus when the
-// text actually changes.
-char renderedRow0[LCD_COLS + 1] = "";
+// Tracks what's currently on screen so we only touch the I2C bus when
+// something actually changes. Row 0 is a label + custom-char bar graph,
+// not plain text, so it's tracked by a small "did the inputs change"
+// key instead of the literal row text (a bar's on-screen bytes aren't a
+// valid C string - see drawBar()).
+char renderedRow0Key[12] = "";
 char renderedRow1[LCD_COLS + 1] = "";
 bool renderedAuthFailed = false;
 
@@ -120,29 +132,29 @@ uint8_t scanForLcdAddress() {
   return 0x27;  // common PCF8574 default, used as a fallback if the scan finds nothing
 }
 
-// Parses the "2026-07-22T01:00:00Z"-style UTC timestamps Anthropic's
-// rate-limit reset headers use. Returns 0 (treated as "unknown", rendered
-// as "--") if the string is empty or doesn't parse - check the Serial log
-// if a screen ever shows "--" instead of a real countdown, since that's
-// the actual header text this parses.
-//
-// mktime() normally interprets struct tm as *local* time, which would be
-// wrong for a UTC string - but configTime() in setup() is called with a
-// 0 gmtOffset, making the device's "local" time UTC, so mktime() ends up
-// UTC here too. (esp32-arduino's newlib doesn't provide timegm().)
-time_t parseIso8601Utc(const char *s) {
+// Draws a fixed BAR_WIDTH-cell bar starting at (col, row): percent/100 of
+// the cells filled with the solid custom glyph, the rest left blank.
+// Always paints every cell in that range, so a shrinking percentage can't
+// leave stale filled cells behind from a previous, larger reading.
+void drawBar(int row, int col, int percent) {
+  percent = constrain(percent, 0, 100);
+  int filled = (percent * BAR_WIDTH + 50) / 100;  // round to nearest cell
+  lcd->setCursor(col, row);
+  for (int i = 0; i < BAR_WIDTH; i++) {
+    lcd->write(i < filled ? FULL_BLOCK_CHAR : ' ');
+  }
+}
+
+// Parses the reset headers - confirmed on real hardware (2026-07-21) to be
+// plain base-10 Unix timestamps (e.g. "1784652600"), not the ISO8601
+// string an earlier version of this code assumed. Returns 0 ("unknown",
+// rendered as "--") if the string is empty or isn't a positive integer.
+time_t parseResetEpoch(const char *s) {
   if (!s || !*s) return 0;
-  struct tm tmv = {};
-  int y, mo, d, h, mi, se;
-  if (sscanf(s, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6) return 0;
-  tmv.tm_year = y - 1900;
-  tmv.tm_mon = mo - 1;
-  tmv.tm_mday = d;
-  tmv.tm_hour = h;
-  tmv.tm_min = mi;
-  tmv.tm_sec = se;
-  tmv.tm_isdst = 0;
-  return mktime(&tmv);
+  char *end = nullptr;
+  long v = strtol(s, &end, 10);
+  if (end == s || v <= 0) return 0;
+  return (time_t)v;
 }
 
 // "4H59M Left" - relative, for the short 5-hour window. Needs the device's
@@ -189,10 +201,12 @@ void renderAuthFailedScreen() {
 // Forces the next render() to rewrite both rows regardless of whether the
 // text looks unchanged - needed after clear()/screen switches/reconnects.
 void forceRedraw() {
-  renderedRow0[0] = '\0';
+  renderedRow0Key[0] = '\0';
   renderedRow1[0] = '\0';
 }
 
+// Row 0: "5H"/"WK" label + a BAR_WIDTH-cell bar graph of the percentage.
+// Row 1: the percentage as a number + the countdown/reset-day detail.
 void render() {
   if (authFailed) {
     if (!renderedAuthFailed) {
@@ -208,34 +222,37 @@ void render() {
     renderedAuthFailed = false;
   }
 
-  char row0[LCD_COLS + 1];
-  char row1[LCD_COLS + 1];
-  char detail[LCD_COLS + 1];
+  const char *label = currentScreen == 0 ? "5H" : "WK";
+  int percent = currentScreen == 0 ? sessionUtilization : weeklyUtilization;
 
+  char row0Key[12];
+  snprintf(row0Key, sizeof(row0Key), "%s%d%d", label, percent, dataStale ? 1 : 0);
+  if (strcmp(row0Key, renderedRow0Key) != 0) {
+    lcd->setCursor(0, 0);
+    lcd->print(label);
+    lcd->print(' ');
+    drawBar(0, strlen(label) + 1, percent < 0 ? 0 : percent);
+    strncpy(renderedRow0Key, row0Key, sizeof(renderedRow0Key) - 1);
+    renderedRow0Key[sizeof(renderedRow0Key) - 1] = '\0';
+  }
+
+  char pctStr[5];
+  if (percent < 0) {
+    snprintf(pctStr, sizeof(pctStr), "--");
+  } else {
+    snprintf(pctStr, sizeof(pctStr), "%d%%", constrain(percent, 0, 100));
+  }
+
+  char detail[LCD_COLS + 1];
   if (currentScreen == 0) {
-    if (sessionUtilization < 0) {
-      snprintf(row0, sizeof(row0), "5H --%%");
-    } else {
-      snprintf(row0, sizeof(row0), "5H %d%%%s", constrain(sessionUtilization, 0, 100),
-               dataStale ? "!" : "");
-    }
     formatCountdown(detail, sizeof(detail), sessionResetEpoch);
   } else {
-    if (weeklyUtilization < 0) {
-      snprintf(row0, sizeof(row0), "WK --%%");
-    } else {
-      snprintf(row0, sizeof(row0), "WK %d%%%s", constrain(weeklyUtilization, 0, 100),
-               dataStale ? "!" : "");
-    }
     formatResetDay(detail, sizeof(detail), weeklyResetEpoch);
   }
-  snprintf(row1, sizeof(row1), "%s", detail);
 
-  if (strcmp(row0, renderedRow0) != 0) {
-    lcdPrintRow(0, row0);
-    strncpy(renderedRow0, row0, LCD_COLS);
-    renderedRow0[LCD_COLS] = '\0';
-  }
+  char row1[LCD_COLS + 1];
+  snprintf(row1, sizeof(row1), "%s %s%s", pctStr, detail, dataStale && percent >= 0 ? "!" : "");
+
   if (LCD_ROWS > 1 && strcmp(row1, renderedRow1) != 0) {
     lcdPrintRow(1, row1);
     strncpy(renderedRow1, row1, LCD_COLS);
@@ -376,6 +393,8 @@ bool fetchUsage() {
   String r5 = https.header("anthropic-ratelimit-unified-5h-reset");
   String r7 = https.header("anthropic-ratelimit-unified-7d-reset");
   https.end();
+  Serial.printf("[API] 5h=%s reset5h='%s' 7d=%s reset7d='%s'\n", h5.c_str(), r5.c_str(),
+                d7.c_str(), r7.c_str());
 
   if (h5.length() == 0 && d7.length() == 0) {
     if (code == 401) {
@@ -391,14 +410,8 @@ bool fetchUsage() {
   // utilization arrives as 0.0-1.0
   sessionUtilization = (int)round(h5.toFloat() * 100.0f);
   weeklyUtilization = (int)round(d7.toFloat() * 100.0f);
-  // Reset headers are assumed ISO8601 UTC (e.g. "2026-07-22T01:00:00Z"),
-  // matching the "-reset" suffix convention Anthropic uses elsewhere in its
-  // rate-limit headers - not yet confirmed against a live response for the
-  // *unified* 5h/7d headers specifically. If a screen shows "--" instead of
-  // a real countdown, print r5/r7 to Serial here and check the actual
-  // header text/format against parseIso8601Utc() above.
-  sessionResetEpoch = parseIso8601Utc(r5.c_str());
-  weeklyResetEpoch = parseIso8601Utc(r7.c_str());
+  sessionResetEpoch = parseResetEpoch(r5.c_str());
+  weeklyResetEpoch = parseResetEpoch(r7.c_str());
   dataStale = false;
   lastContactMs = millis();
   return true;
@@ -414,6 +427,7 @@ void setup() {
   lcd = new LiquidCrystal_I2C(lcdAddress, LCD_COLS, LCD_ROWS);
   lcd->init();
   lcd->backlight();
+  lcd->createChar(FULL_BLOCK_CHAR, fullBlockGlyph);
 
   // STA mode, stale-NVS-cache clear, defensive HT20 bandwidth - see
   // github.com/caffentrager/esp32-wifi-fix-kit. Call once here, not on

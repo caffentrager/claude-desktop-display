@@ -86,16 +86,17 @@ That's it - no bridge script, no second machine to keep running.
 ## Reading the display
 
 The screen alternates between two views every few seconds
-(`SCREEN_ROTATE_MS` in `main.cpp`):
+(`SCREEN_ROTATE_MS` in `main.cpp`), each a label + 10-cell usage bar on
+row 1, and the exact percentage + a time detail on row 2:
 
 ```
-5H 42%
-3H12M Left
+5H [███░░░░░░░]
+42% 3H12M Left
 ```
 
 ```
-WK 17%
-Fri 04:00
+WK [██████░░░░]
+67% Fri 04:00
 ```
 
 - **5H** - utilization of your rolling 5-hour session limit, with a
@@ -103,12 +104,12 @@ Fri 04:00
 - **WK** - utilization of your rolling 7-day (week) limit, with the
   weekday + UTC time it resets (a countdown in hours is less readable for
   a multi-day window)
-- A trailing `!` after a percentage means the device hasn't gotten a good
-  reading in a while (WiFi hiccup, API timeout, etc.) - the last known
-  values stay on screen.
-- Either countdown line reads `--` if the device hasn't yet fetched a
-  valid reset time, or hasn't finished syncing its clock over NTP yet
-  (a few seconds after boot/reconnect - see Troubleshooting).
+- A trailing `!` on row 2 means the device hasn't gotten a good reading in
+  a while (WiFi hiccup, API timeout, etc.) - the last known values stay on
+  screen.
+- The time detail reads `--` if the device hasn't yet fetched a valid
+  reset time, or (5H screen only) hasn't finished syncing its clock over
+  NTP yet (a few seconds after boot/reconnect - see Troubleshooting).
 - **"Auth failed! / Redo setup-token"** replaces both screens if Anthropic
   returns 401 - your token has expired or was revoked. Run `claude
   setup-token` again and update `secrets.h`.
@@ -149,15 +150,19 @@ out. No build step, no dependencies.
   `secrets.h`, and reflash.
 - **Stays stale (`!`) with HTTP errors other than 401 in the log** - check
   the ESP32 actually has internet access (not just LAN).
-- **Countdown/reset line shows `--` instead of a time** - the firmware
-  syncs its clock over NTP (`configTime()` in `setup()`) since the reset
-  screens need real wall-clock time; this takes a few seconds after WiFi
-  comes up, and briefly shows `--` until it completes. If it never clears,
-  check the ESP32 has real internet access (NTP needs UDP/123 outbound,
-  not just HTTP(S)) and that the reset headers actually came back in the
-  last poll (check the Serial log around `[API] HTTP` - see the comment
-  above `sessionResetEpoch =` in `fetchUsage()` in `main.cpp` if the header
-  name/format ever needs adjusting).
+- **5H screen's countdown shows `--` instead of a time** - it needs the
+  device's own clock, synced over NTP (`configTime()` in `setup()`);
+  this takes a few seconds after WiFi comes up, and briefly shows `--`
+  until it completes. If it never clears, check the ESP32 has real
+  internet access (NTP needs UDP/123 outbound, not just HTTP(S)). (The WK
+  screen's reset day/time doesn't need this - it's computed straight from
+  the API's own reset timestamp, no local clock involved.)
+- **Either screen's time detail is stuck on `--` even though the
+  percentage is populated** - the `anthropic-ratelimit-unified-{5h,7d}-reset`
+  headers didn't come back, or came back in an unexpected format. Check the
+  Serial log line `[API] 5h=... reset5h='...' 7d=... reset7d='...'` in
+  `fetchUsage()` - as of 2026-07-21 these are plain Unix timestamps (e.g.
+  `1784652600`), parsed by `parseResetEpoch()` in `main.cpp`.
 
 ## Security note
 
