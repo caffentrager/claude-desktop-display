@@ -23,18 +23,32 @@
 #define PIN_SDA 4
 #define PIN_SCL 5
 
+// Wiring: one leg to GPIO6, the other to GND. Uses the internal pull-up
+// (no external resistor needed). Change this if your board doesn't break
+// out GPIO6 - anything free that isn't SDA/SCL or a strapping pin
+// (GPIO2/8/9 on ESP32-C3) works.
+#define PIN_SCREEN_BUTTON 6
+#define BUTTON_DEBOUNCE_MS 250UL
+
 // This calls the real Anthropic API every poll, so don't hammer it. 120s
 // matches claude-usage-stick's own default (tested range: 30s-300s).
 #define REFRESH_INTERVAL_MS 120000UL
 #define HTTP_TIMEOUT_MS 15000UL
 #define STALE_AFTER_MS (3UL * REFRESH_INTERVAL_MS)  // flag data as stale after a few missed polls
 
-// The two screens (5-hour detail, weekly detail) alternate on this interval.
+// The three screens (5-hour detail, weekly detail, combined glance)
+// alternate on this interval; the button also advances early on demand.
 #define SCREEN_ROTATE_MS 4000UL
+#define SCREEN_COUNT 3
 
 // Width, in LCD cells, of the usage bar on row 0 - fixed regardless of
 // LCD_COLS, matching the layout designed in lcd_editor.html.
 #define BAR_WIDTH 10
+
+// Sub-cell fill steps per bar cell (5 = one HD44780 glyph column each),
+// for finer resolution than a plain filled/empty cell would give -
+// BAR_WIDTH * BAR_SUBDIV distinct levels across the whole bar.
+#define BAR_SUBDIV 5
 
 // Hardcoded for this specific device's desk (Seoul) - only affects the WK
 // screen's displayed weekday/time. KST has no DST, so this never needs a
@@ -58,9 +72,31 @@
 LiquidCrystal_I2C *lcd = nullptr;
 Esp32WifiFix wifiFix;
 
+// CGRAM has 8 slots (0-7). Bar uses 0 (full) + 1-4 (partial fill, 1-4 of
+// 5 columns lit - see BAR_SUBDIV); 5 is a small decorative sparkle, used
+// on the boot splash and tucked into spare columns on the detail screens.
+// 6-7 are free.
 static const byte FULL_BLOCK_CHAR = 0;
+static const byte LOGO_CHAR = 5;
+// PARTIAL_FILL_CHARS[i] = the glyph for (i+1) of BAR_SUBDIV columns lit,
+// i.e. index 0..3 -> CGRAM slots 1..4 (5/5 lit reuses FULL_BLOCK_CHAR
+// instead of a 5th glyph, since that's already an all-columns-lit block).
+static const byte PARTIAL_FILL_CHARS[BAR_SUBDIV - 1] = {1, 2, 3, 4};
+
 static byte fullBlockGlyph[8] = {
     0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111,
+};
+static byte partialFillGlyphs[BAR_SUBDIV - 1][8] = {
+    {0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000},
+    {0b11000, 0b11000, 0b11000, 0b11000, 0b11000, 0b11000, 0b11000, 0b11000},
+    {0b11100, 0b11100, 0b11100, 0b11100, 0b11100, 0b11100, 0b11100, 0b11100},
+    {0b11110, 0b11110, 0b11110, 0b11110, 0b11110, 0b11110, 0b11110, 0b11110},
+};
+// An original decorative sparkle/starburst, not a reproduction of any
+// company's actual logo (5x8 monochrome pixels can't meaningfully
+// reproduce one anyway) - just a small "something's sparkly here" touch.
+static byte logoGlyph[8] = {
+    0b01010, 0b00100, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0b00100,
 };
 
 int sessionUtilization = -1;  // 5-hour usage %, -1 = no data yet
@@ -71,17 +107,20 @@ bool dataStale = true;
 bool authFailed = false;
 unsigned long lastContactMs = 0;
 
-// The display cycles between a 5-hour detail screen and a weekly detail
-// screen instead of showing both at once - see readai.md.
-int currentScreen = 0;  // 0 = 5H detail, 1 = WK detail
+// The display cycles through 3 screens automatically, or on demand via
+// PIN_SCREEN_BUTTON (checkScreenButton()) - see readai.md.
+int currentScreen = 0;  // 0 = 5H detail, 1 = WK detail, 2 = combined glance
 unsigned long lastScreenSwitchMs = 0;
 
 // Tracks what's currently on screen so we only touch the I2C bus when
-// something actually changes. Row 0 is a label + custom-char bar graph,
-// not plain text, so it's tracked by a small "did the inputs change"
-// key instead of the literal row text (a bar's on-screen bytes aren't a
-// valid C string - see drawBar()).
+// something actually changes. Row 0 on the bar screens is a label +
+// custom-char bar graph, not plain text, so it's tracked by a small "did
+// the inputs change" key instead of the literal row text (a bar's
+// on-screen bytes aren't a valid C string - see drawBar()). The combined
+// screen's row 0 is plain text, so it gets its own literal-text buffer
+// instead of reusing the bar screens' key.
 char renderedRow0Key[12] = "";
+char renderedCombinedRow0[LCD_COLS + 1] = "";
 char renderedRow1[LCD_COLS + 1] = "";
 bool renderedAuthFailed = false;
 
@@ -137,16 +176,24 @@ uint8_t scanForLcdAddress() {
   return 0x27;  // common PCF8574 default, used as a fallback if the scan finds nothing
 }
 
-// Draws a fixed BAR_WIDTH-cell bar starting at (col, row): percent/100 of
-// the cells filled with the solid custom glyph, the rest left blank.
-// Always paints every cell in that range, so a shrinking percentage can't
-// leave stale filled cells behind from a previous, larger reading.
+// Draws a fixed BAR_WIDTH-cell bar starting at (col, row) with BAR_SUBDIV
+// levels of resolution per cell (partial-fill glyphs for the one cell
+// straddling the fill boundary, full/blank for the rest). Always paints
+// every cell in that range, so a shrinking percentage can't leave stale
+// filled cells behind from a previous, larger reading.
 void drawBar(int row, int col, int percent) {
   percent = constrain(percent, 0, 100);
-  int filled = (percent * BAR_WIDTH + 50) / 100;  // round to nearest cell
+  int filledUnits = (percent * BAR_WIDTH * BAR_SUBDIV + 50) / 100;
   lcd->setCursor(col, row);
   for (int i = 0; i < BAR_WIDTH; i++) {
-    lcd->write(i < filled ? FULL_BLOCK_CHAR : ' ');
+    int cellUnits = filledUnits - i * BAR_SUBDIV;
+    if (cellUnits <= 0) {
+      lcd->write(' ');
+    } else if (cellUnits >= BAR_SUBDIV) {
+      lcd->write(FULL_BLOCK_CHAR);
+    } else {
+      lcd->write(PARTIAL_FILL_CHARS[cellUnits - 1]);
+    }
   }
 }
 
@@ -162,10 +209,12 @@ time_t parseResetEpoch(const char *s) {
   return (time_t)v;
 }
 
-// "4H59M Left" - relative, for the short 5-hour window. Needs the device's
-// clock to actually be synced (see configTime() in setup()); until SNTP
-// finishes syncing after boot, time(nullptr) is small and this will show a
-// large, wrong duration for the first few seconds.
+// "4H59M" (no suffix - callers that want "... Left" append it themselves,
+// since the combined glance screen doesn't have room for it) - relative,
+// for the short 5-hour window. Needs the device's clock to actually be
+// synced (see configTime() in setup()); until SNTP finishes syncing after
+// boot, time(nullptr) is small and this will show a large, wrong duration
+// for the first few seconds.
 void formatCountdown(char *out, size_t outSize, time_t resetEpoch) {
   if (resetEpoch <= 0) {
     snprintf(out, outSize, "--");
@@ -179,7 +228,7 @@ void formatCountdown(char *out, size_t outSize, time_t resetEpoch) {
     snprintf(out, outSize, "--");
     return;
   }
-  snprintf(out, outSize, "%ldH%02ldM Left", remain / 3600, (remain % 3600) / 60);
+  snprintf(out, outSize, "%ldH%02ldM", remain / 3600, (remain % 3600) / 60);
 }
 
 // "Fri 19:00" - absolute weekday+time in DISPLAY_TZ_OFFSET_SEC (Seoul), for
@@ -211,10 +260,50 @@ void renderAuthFailedScreen() {
 // text looks unchanged - needed after clear()/screen switches/reconnects.
 void forceRedraw() {
   renderedRow0Key[0] = '\0';
+  renderedCombinedRow0[0] = '\0';
   renderedRow1[0] = '\0';
 }
 
-// Row 0: "5H"/"WK" label + a BAR_WIDTH-cell bar graph of the percentage.
+void formatPercent(char *out, size_t outSize, int percent) {
+  if (percent < 0) {
+    snprintf(out, outSize, "--");
+  } else {
+    snprintf(out, outSize, "%d%%", constrain(percent, 0, 100));
+  }
+}
+
+// Both metrics on one screen, compact: no bars (no room), just numbers -
+// see readai.md for why this doesn't fit the "Left" suffix or a stale
+// marker the way the dedicated screens do.
+void renderCombinedScreen() {
+  char p5[5], pWk[5], c5[6], cWk[10];
+  formatPercent(p5, sizeof(p5), sessionUtilization);
+  formatPercent(pWk, sizeof(pWk), weeklyUtilization);
+  formatCountdown(c5, sizeof(c5), sessionResetEpoch);
+  formatResetDay(cWk, sizeof(cWk), weeklyResetEpoch);
+
+  // No space between label and percent (unlike the dedicated screens) -
+  // needed to stay within LCD_COLS at 100% ("WK100% Fri 19:00" is exactly
+  // 16 chars; "WK 100% Fri 19:00" would be 17 and get silently truncated).
+  char row0[LCD_COLS + 1];
+  char row1[LCD_COLS + 1];
+  snprintf(row0, sizeof(row0), "5H%s %s", p5, c5);
+  snprintf(row1, sizeof(row1), "WK%s %s", pWk, cWk);
+
+  if (strcmp(row0, renderedCombinedRow0) != 0) {
+    lcdPrintRow(0, row0);
+    strncpy(renderedCombinedRow0, row0, LCD_COLS);
+    renderedCombinedRow0[LCD_COLS] = '\0';
+  }
+  if (LCD_ROWS > 1 && strcmp(row1, renderedRow1) != 0) {
+    lcdPrintRow(1, row1);
+    strncpy(renderedRow1, row1, LCD_COLS);
+    renderedRow1[LCD_COLS] = '\0';
+  }
+}
+
+// Row 0: "5H"/"WK" label + a BAR_WIDTH-cell bar graph of the percentage,
+// plus a decorative sparkle in the spare columns to the right of the bar.
 // Row 1: the percentage as a number + the countdown/reset-day detail.
 void render() {
   if (authFailed) {
@@ -231,6 +320,11 @@ void render() {
     renderedAuthFailed = false;
   }
 
+  if (currentScreen == 2) {
+    renderCombinedScreen();
+    return;
+  }
+
   const char *label = currentScreen == 0 ? "5H" : "WK";
   int percent = currentScreen == 0 ? sessionUtilization : weeklyUtilization;
 
@@ -241,20 +335,24 @@ void render() {
     lcd->print(label);
     lcd->print(' ');
     drawBar(0, strlen(label) + 1, percent < 0 ? 0 : percent);
+    lcd->print(' ');
+    lcd->write(LOGO_CHAR);
     strncpy(renderedRow0Key, row0Key, sizeof(renderedRow0Key) - 1);
     renderedRow0Key[sizeof(renderedRow0Key) - 1] = '\0';
   }
 
   char pctStr[5];
-  if (percent < 0) {
-    snprintf(pctStr, sizeof(pctStr), "--");
-  } else {
-    snprintf(pctStr, sizeof(pctStr), "%d%%", constrain(percent, 0, 100));
-  }
+  formatPercent(pctStr, sizeof(pctStr), percent);
 
   char detail[LCD_COLS + 1];
   if (currentScreen == 0) {
-    formatCountdown(detail, sizeof(detail), sessionResetEpoch);
+    char countdown[8];
+    formatCountdown(countdown, sizeof(countdown), sessionResetEpoch);
+    if (strcmp(countdown, "--") == 0) {
+      snprintf(detail, sizeof(detail), "--");
+    } else {
+      snprintf(detail, sizeof(detail), "%s Left", countdown);
+    }
   } else {
     formatResetDay(detail, sizeof(detail), weeklyResetEpoch);
   }
@@ -429,6 +527,7 @@ bool fetchUsage() {
 void setup() {
   Serial.begin(115200);
   Wire.begin(PIN_SDA, PIN_SCL);
+  pinMode(PIN_SCREEN_BUTTON, INPUT_PULLUP);
 
   uint8_t lcdAddress = scanForLcdAddress();
   Serial.printf("LCD I2C address: 0x%02X\n", lcdAddress);
@@ -437,6 +536,15 @@ void setup() {
   lcd->init();
   lcd->backlight();
   lcd->createChar(FULL_BLOCK_CHAR, fullBlockGlyph);
+  for (int i = 0; i < BAR_SUBDIV - 1; i++) {
+    lcd->createChar(PARTIAL_FILL_CHARS[i], partialFillGlyphs[i]);
+  }
+  lcd->createChar(LOGO_CHAR, logoGlyph);
+
+  lcd->setCursor(0, 0);
+  lcd->print("ClaudeMeter ");
+  lcd->write(LOGO_CHAR);
+  delay(800);
 
   // STA mode, stale-NVS-cache clear, defensive HT20 bandwidth - see
   // github.com/caffentrager/esp32-wifi-fix-kit. Call once here, not on
@@ -461,6 +569,30 @@ void setup() {
 
 unsigned long lastFetchAttemptMs = 0;
 
+// Standard Arduino debounce pattern: the raw pin reading has to sit still
+// for BUTTON_DEBOUNCE_MS before a change counts, so switch bounce doesn't
+// register as multiple presses. PIN_SCREEN_BUTTON is INPUT_PULLUP, so a
+// press reads LOW.
+int buttonDebouncedState = HIGH;
+int buttonLastReading = HIGH;
+unsigned long buttonLastChangeMs = 0;
+
+void checkScreenButton() {
+  int reading = digitalRead(PIN_SCREEN_BUTTON);
+  if (reading != buttonLastReading) {
+    buttonLastChangeMs = millis();
+  }
+  if (millis() - buttonLastChangeMs > BUTTON_DEBOUNCE_MS && reading != buttonDebouncedState) {
+    buttonDebouncedState = reading;
+    if (buttonDebouncedState == LOW) {
+      currentScreen = (currentScreen + 1) % SCREEN_COUNT;
+      lastScreenSwitchMs = millis();  // don't also auto-advance right after a manual press
+      forceRedraw();
+    }
+  }
+  buttonLastReading = reading;
+}
+
 void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
@@ -475,8 +607,10 @@ void loop() {
     dataStale = true;
   }
 
+  checkScreenButton();
+
   if (millis() - lastScreenSwitchMs >= SCREEN_ROTATE_MS) {
-    currentScreen = (currentScreen + 1) % 2;
+    currentScreen = (currentScreen + 1) % SCREEN_COUNT;
     lastScreenSwitchMs = millis();
     forceRedraw();  // row content's meaning changes across screens, not just its value
   }

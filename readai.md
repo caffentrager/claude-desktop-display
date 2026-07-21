@@ -46,19 +46,31 @@ setup/wiring/troubleshooting.
   as a normal C string; row 1 is plain text, tracked in `renderedRow1` the
   straightforward way.
 
-## Display: rotating 5H/WK screens, each with a bar + a time detail
+## Display: 3 screens (5H, WK, combined glance), button-switchable
 
-The LCD alternates between two screens (`currentScreen` in `main.cpp`,
-flipped every `SCREEN_ROTATE_MS` from `loop()`) - designed with
-`lcd_editor.html` (see below). Each screen is 2 rows:
+The LCD cycles through 3 screens (`currentScreen`, 0/1/2), advancing every
+`SCREEN_ROTATE_MS` from `loop()` **or** on a press of `PIN_SCREEN_BUTTON`
+(debounced in `checkScreenButton()`, standard Arduino debounce pattern -
+raw reading must sit still for `BUTTON_DEBOUNCE_MS` before it counts).
+A button press also resets `lastScreenSwitchMs`, so the automatic timer
+doesn't immediately advance again right on top of a manual one. Note the
+button is only polled once per `loop()` iteration, which ends in
+`delay(1000)` - so there's up to ~1s + `BUTTON_DEBOUNCE_MS` latency between
+a press and the screen changing; this is a deliberate non-goal (nothing
+about this device is latency-sensitive) not an overlooked bug.
 
-- Row 0: `"5H"`/`"WK"` label + a fixed `BAR_WIDTH`-cell (10) bar graph of
-  the percentage, drawn with `drawBar()` using a custom full-block CGRAM
-  glyph (`FULL_BLOCK_CHAR`).
+Screens 0/1 ("5H"/"WK" detail, designed with `lcd_editor.html` - see
+below) are each 2 rows:
+
+- Row 0: label + a fixed `BAR_WIDTH`-cell (10) bar graph of the
+  percentage, drawn with `drawBar()`, plus a decorative sparkle
+  (`LOGO_CHAR`) in the spare columns to the right of the bar.
 - Row 1: the exact percentage as a number, plus a time detail:
-  - Screen 0 ("5H"): `formatCountdown()` - a relative "3H12M Left"
-    countdown to when the 5-hour window resets. Relative reads better for
-    a short window.
+  - Screen 0 ("5H"): `formatCountdown()` - a relative "3H12M" countdown to
+    when the 5-hour window resets (screen 0's `render()` branch appends
+    " Left" itself; `formatCountdown()`'s raw output has no suffix so
+    screen 2 can reuse it without one - see below). Relative reads better
+    for a short window.
   - Screen 1 ("WK"): `formatResetDay()` - an absolute "Fri 19:00" (weekday
     + time, shifted by `DISPLAY_TZ_OFFSET_SEC`) for when the 7-day window
     resets. Absolute reads better than a multi-day countdown.
@@ -67,6 +79,33 @@ flipped every `SCREEN_ROTATE_MS` from `loop()`) - designed with
     from anything - only shifts the *displayed* value passed to
     `gmtime_r()`, not `resetEpoch` itself, so it can't skew
     `formatCountdown()`'s duration math (which stays pure UTC-vs-UTC).
+
+Screen 2 (`renderCombinedScreen()`) shows both metrics on one screen, no
+rotation needed for a quick glance: `"5H<pct> <countdown>"` /
+`"WK<pct> <resetday>"`. Two things worth knowing if you touch this:
+- **No space between the label and percent** (`"5H100%"`, not
+  `"5H 100%"`) - deliberate, not a typo. With the space, `"WK100% Fri
+  19:00"` is 16 chars but `"WK 100% Fri 19:00"` is 17, which silently
+  truncates on a 16-col display exactly when weeklyUtilization is 100 -
+  a real, reachable value, not just a theoretical edge case. Verified via
+  a host-side Python length check before flashing (see git history for
+  the fix commit). If you add anything to this screen, recheck the
+  100%-on-both-metrics case fits.
+- No bar graphs (no room) and no stale/`!` marker - this screen trades
+  those for compactness; check the dedicated screens for that detail.
+
+CGRAM (8 slots, 0-7) is now fully allocated:
+- 0: full-block (`FULL_BLOCK_CHAR`) - bar cells that are completely filled.
+- 1-4: partial-fill glyphs (`PARTIAL_FILL_CHARS`, 1-4 of `BAR_SUBDIV`=5
+  columns lit) - only the one bar cell straddling the fill boundary ever
+  uses one of these; `drawBar()` computes `filledUnits` in units of
+  1/`BAR_SUBDIV` of a cell rather than whole cells, for
+  `BAR_WIDTH * BAR_SUBDIV` (50) distinct bar levels instead of just 10.
+- 5: `LOGO_CHAR`, a small original sparkle/starburst (not a reproduction
+  of any real logo - 5x8 monochrome pixels can't meaningfully do that
+  anyway), shown on the boot splash (`"ClaudeMeter <sparkle>"` in
+  `setup()`, before WiFi connects) and at the end of row 0 on screens 0/1.
+- 6-7: unused.
 
 This depends on two things that didn't exist before this design:
 
@@ -154,6 +193,12 @@ This is the part most likely to surprise a future reader:
 - `REFRESH_INTERVAL_MS` (120s) hits the real Anthropic Messages API every
   poll - don't lower this aggressively, it's a real (if minimal,
   `max_tokens=1`) request against production rate limits.
+- `PIN_SCREEN_BUTTON` defaults to GPIO6, picked specifically to avoid
+  ESP32-C3's strapping pins (GPIO2/8/9 - GPIO9 in particular is the same
+  pin as the BOOT button on most boards; wiring a second button there
+  wouldn't break normal runtime presses, but it's a needless landmine for
+  reset/download-mode behavior). If GPIO6 isn't broken out on a given
+  board variant, prefer another non-strapping, non-SDA/SCL pin over GPIO9.
 
 ## Naming note
 

@@ -27,7 +27,9 @@ this project's original inspiration, does).
 - An ESP32-C3 board (any variant - DevKitM-1, "SuperMini", Xiao ESP32C3, ...)
 - A character LCD (16x2 or 20x4) with a **PCF8574 I2C backpack** (the common
   4-pin GND/VCC/SDA/SCL modules)
-- 4 jumper wires
+- A momentary push button (optional - manually switches screens; without
+  it the display just rotates on its own)
+- Jumper wires
 
 ### Wiring
 
@@ -37,6 +39,11 @@ this project's original inspiration, does).
 | VCC | 5V (or 3V3 - see note below) |
 | SDA | GPIO4 |
 | SCL | GPIO5 |
+
+Button (optional): one leg to **GPIO6**, the other to **GND**. No resistor
+needed - the firmware uses the pin's internal pull-up. If your board
+doesn't break out GPIO6, change `PIN_SCREEN_BUTTON` in `main.cpp` to any
+free pin that isn't SDA/SCL or a strapping pin (GPIO2/8/9 on ESP32-C3).
 
 > Most PCF8574 backpacks and the HD44780 LCD they drive want 5V for a bright
 > backlight/contrast; the I2C bus itself is fine being read by the ESP32-C3's
@@ -81,22 +88,31 @@ row's text is short and left-aligned either way, so a wider display just
 shows it with extra blank space on the right rather than needing layout
 changes.
 
+On first power-up you'll briefly see a "ClaudeMeter ✳" splash (the ✳ is a
+small custom sparkle character, not a reproduction of any real logo) before
+it moves on to connecting WiFi.
+
 That's it - no bridge script, no second machine to keep running.
 
 ## Reading the display
 
-The screen alternates between two views every few seconds
-(`SCREEN_ROTATE_MS` in `main.cpp`), each a label + 10-cell usage bar on
-row 1, and the exact percentage + a time detail on row 2:
+The screen cycles through three views every few seconds
+(`SCREEN_ROTATE_MS` in `main.cpp`) - press the button (if wired) to jump
+to the next one immediately instead of waiting:
 
 ```
-5H [███░░░░░░░]
+5H [███░░░░░░░] ✳
 42% 3H12M Left
 ```
 
 ```
-WK [██████░░░░]
+WK [██████░░░░] ✳
 67% Fri 19:00
+```
+
+```
+5H42% 3H12M
+WK67% Fri 19:00
 ```
 
 - **5H** - utilization of your rolling 5-hour session limit, with a
@@ -106,6 +122,12 @@ WK [██████░░░░]
   multi-day window). Shown in `DISPLAY_TZ_OFFSET_SEC`'s timezone in
   `main.cpp` - hardcoded to KST (UTC+9) for this build; change that
   constant if you're building for a different timezone.
+- The third, combined screen has both at a glance, compactly - no bar
+  graphs (no room) and no stale/`!` marker, just the numbers. Check the
+  dedicated 5H/WK screens if you need those.
+- The bar itself has finer-than-one-cell resolution (`BAR_SUBDIV` in
+  `main.cpp`, 5 sub-steps per cell) using a few extra custom characters,
+  not just filled/empty blocks.
 - A trailing `!` on row 2 means the device hasn't gotten a good reading in
   a while (WiFi hiccup, API timeout, etc.) - the last known values stay on
   screen.
