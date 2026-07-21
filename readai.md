@@ -59,9 +59,14 @@ flipped every `SCREEN_ROTATE_MS` from `loop()`) - designed with
   - Screen 0 ("5H"): `formatCountdown()` - a relative "3H12M Left"
     countdown to when the 5-hour window resets. Relative reads better for
     a short window.
-  - Screen 1 ("WK"): `formatResetDay()` - an absolute "Fri 04:00" (UTC
-    weekday + time) for when the 7-day window resets. Absolute reads
-    better than a multi-day countdown.
+  - Screen 1 ("WK"): `formatResetDay()` - an absolute "Fri 19:00" (weekday
+    + time, shifted by `DISPLAY_TZ_OFFSET_SEC`) for when the 7-day window
+    resets. Absolute reads better than a multi-day countdown.
+    `DISPLAY_TZ_OFFSET_SEC` is hardcoded to `9*3600` (KST, this device's
+    desk) per explicit user request rather than made configurable/derived
+    from anything - only shifts the *displayed* value passed to
+    `gmtime_r()`, not `resetEpoch` itself, so it can't skew
+    `formatCountdown()`'s duration math (which stays pure UTC-vs-UTC).
 
 This depends on two things that didn't exist before this design:
 

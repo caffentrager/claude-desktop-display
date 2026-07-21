@@ -96,14 +96,16 @@ row 1, and the exact percentage + a time detail on row 2:
 
 ```
 WK [██████░░░░]
-67% Fri 04:00
+67% Fri 19:00
 ```
 
 - **5H** - utilization of your rolling 5-hour session limit, with a
   countdown to when it resets
 - **WK** - utilization of your rolling 7-day (week) limit, with the
-  weekday + UTC time it resets (a countdown in hours is less readable for
-  a multi-day window)
+  weekday + time it resets (a countdown in hours is less readable for a
+  multi-day window). Shown in `DISPLAY_TZ_OFFSET_SEC`'s timezone in
+  `main.cpp` - hardcoded to KST (UTC+9) for this build; change that
+  constant if you're building for a different timezone.
 - A trailing `!` on row 2 means the device hasn't gotten a good reading in
   a while (WiFi hiccup, API timeout, etc.) - the last known values stay on
   screen.

@@ -36,6 +36,11 @@
 // LCD_COLS, matching the layout designed in lcd_editor.html.
 #define BAR_WIDTH 10
 
+// Hardcoded for this specific device's desk (Seoul) - only affects the WK
+// screen's displayed weekday/time. KST has no DST, so this never needs a
+// seasonal adjustment; if this device is ever relocated, change this.
+#define DISPLAY_TZ_OFFSET_SEC (9 * 3600)
+
 // Same endpoint/headers/probe model Claude Code itself uses when checking
 // rate limits - see https://github.com/oauramos/claude-usage-stick.
 #define MESSAGES_ENDPOINT "https://api.anthropic.com/v1/messages"
@@ -177,15 +182,19 @@ void formatCountdown(char *out, size_t outSize, time_t resetEpoch) {
   snprintf(out, outSize, "%ldH%02ldM Left", remain / 3600, (remain % 3600) / 60);
 }
 
-// "Fri 24:00" - absolute weekday+time (UTC), for the multi-day weekly
-// window, where a countdown in hours would be harder to read at a glance.
+// "Fri 19:00" - absolute weekday+time in DISPLAY_TZ_OFFSET_SEC (Seoul), for
+// the multi-day weekly window, where a countdown in hours would be harder
+// to read at a glance. resetEpoch itself (UTC, from the API) is untouched -
+// only shifted for this display's benefit, so formatCountdown()'s duration
+// math elsewhere isn't affected by this offset.
 void formatResetDay(char *out, size_t outSize, time_t resetEpoch) {
   if (resetEpoch <= 0) {
     snprintf(out, outSize, "--");
     return;
   }
+  time_t localEpoch = resetEpoch + DISPLAY_TZ_OFFSET_SEC;
   struct tm tmv;
-  gmtime_r(&resetEpoch, &tmv);
+  gmtime_r(&localEpoch, &tmv);
   static const char *wdays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
   snprintf(out, outSize, "%s %02d:%02d", wdays[tmv.tm_wday], tmv.tm_hour, tmv.tm_min);
 }
