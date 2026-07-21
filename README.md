@@ -1,6 +1,6 @@
 [English](README.md) | [한국어](README.ko.md)
 
-# ClaudeMeter LCD
+# Claude Desktop Display
 
 A standalone desk gadget that shows your Claude **5-hour** and **Week** rate-limit
 usage on a character LCD wired to an ESP32-C3. No PC has to stay running -

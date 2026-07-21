@@ -2,15 +2,14 @@
 
 ## What this is
 
-**ClaudeMeter LCD**: an ESP32-C3 + I2C character-LCD desk gadget that shows
+**Claude Desktop Display**: an ESP32-C3 + I2C character-LCD desk gadget that shows
 Claude Code's 5-hour and weekly rate-limit usage, polling
 `api.anthropic.com` directly with a Claude Code OAuth token (`claude
 setup-token`) - no PC has to stay running. See `README.md` for user-facing
 setup/wiring/troubleshooting.
 
-- Repo name is `claude-desktop-display`; the project's own README/LCD
-  banner call it "ClaudeMeter LCD" (see "Naming note" below) - same
-  project, two labels.
+- Repo name is `claude-desktop-display`, matching the project's own name
+  and the actual boot-splash text (see "Naming note" below).
 - Everything firmware-related lives in `firmware/` (PlatformIO project,
   `env:esp32-c3`, board id `esp32-c3-devkitm-1` but tested on SuperMini
   clones too).
@@ -316,11 +315,15 @@ This is the part most likely to surprise a future reader:
 
 ## Naming note
 
-The repo is named `claude-desktop-display`; the project's own
-`README.md`/LCD banner call it "ClaudeMeter LCD" (chosen for its
-ClaudeMeter-macOS-app lineage - see Credits in `README.md`). Both names
-refer to the same project; this file and the README use them
-interchangeably.
+The project is called **Claude Desktop Display**, matching the repo name
+(`claude-desktop-display`) and the actual boot-splash text in `setup()`
+(`"<sparkle> Claude"` / `"Desktop Display"`). Earlier drafts of these docs
+also called it "ClaudeMeter LCD," as a nod to
+[eddmann/ClaudeMeter](https://github.com/eddmann/ClaudeMeter) (the macOS
+app that originally inspired this project - still credited in Credits in
+`README.md`). That alternate name has since been dropped everywhere except
+that one Credits attribution, so there's a single name for the project
+itself now, not two used interchangeably.
 
 ## Non-goals / out of scope
 

@@ -1,6 +1,6 @@
 [English](README.md) | [한국어](README.ko.md)
 
-# ClaudeMeter LCD
+# Claude Desktop Display
 
 ESP32-C3에 연결한 캐릭터 LCD에 내 Claude **5시간** / **주간** rate-limit
 사용량을 띄워주는 독립형 데스크 기기. PC를 계속 켜둘 필요 없음 - 기기가
