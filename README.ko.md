@@ -1,0 +1,181 @@
+[English](README.md) | [한국어](README.ko.md)
+
+# ClaudeMeter LCD
+
+ESP32-C3에 연결한 캐릭터 LCD에 내 Claude **5시간** / **주간** rate-limit
+사용량을 띄워주는 독립형 데스크 기기. PC를 계속 켜둘 필요 없음 - 기기가
+Anthropic API에 직접 붙는다.
+
+```
+ ESP32-C3  <--HTTPS, OAuth Bearer token-->  api.anthropic.com
+(SDA=GPIO4, SCL=GPIO5)                      (real Messages endpoint)
+```
+
+[claude-usage-stick](https://github.com/oauramos/claude-usage-stick) 프로젝트
+(그리고 Claude Code CLI 자기 자신)가 한도를 확인하는 방식과 똑같다: Claude
+Code OAuth 토큰으로 `/v1/messages`에 `max_tokens: 1`짜리 작은 요청을 보내고,
+응답 헤더에서 바로 사용률을 읽는다 - `anthropic-ratelimit-unified-5h-utilization`,
+`anthropic-ratelimit-unified-7d-utilization`. 진짜 API 엔드포인트라서 뚫어야 할
+Cloudflare 봇 차단도 없고 빼내야 할 브라우저 쿠키도 없다. 이 프로젝트의 원래
+영감이 된 macOS 앱 [ClaudeMeter](https://github.com/eddmann/ClaudeMeter)처럼
+claude.ai 내부 웹 API를 스크래핑하는 것과는 다르다.
+
+## 하드웨어
+
+- ESP32-C3 보드 (DevKitM-1, "SuperMini", Xiao ESP32C3 등 아무 변형이나)
+- **PCF8574 I2C 백팩**이 달린 캐릭터 LCD (16x2 또는 20x4) - 흔한 4핀
+  GND/VCC/SDA/SCL 모듈
+- 점퍼 와이어 4개
+
+### 배선
+
+| LCD 백팩 핀 | ESP32-C3 핀 |
+|---|---|
+| GND | GND |
+| VCC | 5V (또는 3V3 - 아래 참고) |
+| SDA | GPIO4 |
+| SCL | GPIO5 |
+
+> 대부분의 PCF8574 백팩과 그게 구동하는 HD44780 LCD는 밝은 백라이트/명암비를
+> 위해 5V를 원한다. I2C 버스 자체는 이런 모듈 대부분에서 ESP32-C3의 3.3V
+> 로직 핀으로 5V 전원 백팩을 읽어도 실제로는 문제없다 (레벨 시프터 불필요).
+> 보드에 5V 핀이 없다면 (USB Vbus passthrough) 3V3도 되긴 하는데, 좀 더
+> 어둡다.
+
+화면에 아무것도 안 뜨면 LCD/백팩 뒷면의 작은 가변저항을 돌려볼 것 - 명암비
+조정용이고, 기본 상태로 완전히 낮춰져 있는 경우가 많다.
+
+## 설정
+
+### 1. Claude Code OAuth 토큰 받기
+
+[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)가 설치되어
+로그인되어 있는 아무 머신에서:
+
+```bash
+claude setup-token
+```
+
+이런 비대화형 용도로 쓰라고 만들어진 장기 유효 OAuth 토큰이 출력된다. 복사해
+둘 것.
+
+### 2. 펌웨어 설정 및 플래시
+
+[PlatformIO](https://platformio.org/)(CLI 또는 VS Code 확장)가 필요하다.
+
+```bash
+cd firmware
+cp src/secrets.example.h src/secrets.h
+# src/secrets.h 편집: WiFi SSID/비밀번호 + 1단계에서 받은 토큰
+pio run --target upload
+pio device monitor
+```
+
+시리얼 모니터에 LCD의 감지된 I2C 주소, WiFi 연결 진행 상황, 매 폴링의 HTTP
+상태가 표시된다. LCD가 16x2가 아니라 20x4라면 `firmware/src/main.cpp` 맨
+위의 `LCD_COLS`/`LCD_ROWS`만 바꾸면 된다 - 각 줄 텍스트가 어차피 짧고
+왼쪽 정렬이라, 더 넓은 디스플레이에서는 그냥 오른쪽에 여백이 좀 더
+생길 뿐 레이아웃을 따로 손볼 필요는 없다.
+
+이게 끝 - 브릿지 스크립트도, 계속 켜둬야 할 두 번째 머신도 필요 없다.
+
+## 디스플레이 읽는 법
+
+화면은 몇 초 간격으로 (`main.cpp`의 `SCREEN_ROTATE_MS`) 두 화면을 번갈아
+보여준다:
+
+```
+5H 42%
+3H12M Left
+```
+
+```
+WK 17%
+Fri 04:00
+```
+
+- **5H** - 5시간 롤링 세션 한도의 사용률과, 리셋까지 남은 시간
+- **WK** - 7일(주간) 롤링 한도의 사용률과, 리셋되는 요일 + UTC 시각 (여러
+  날에 걸친 기간은 시간 단위 카운트다운보다 이쪽이 더 읽기 편하다)
+- 퍼센트 뒤에 붙는 `!`는 기기가 한동안 제대로 된 값을 못 받아왔다는 뜻이다
+  (WiFi 끊김, API 타임아웃 등) - 화면에는 마지막으로 알던 값이 그대로 남는다.
+- 카운트다운/리셋 줄이 `--`로 나온다면 아직 유효한 리셋 시각을 못 받았거나,
+  부팅/재연결 직후라 NTP로 시계를 아직 못 맞춘 것이다 (문제 해결 참고).
+- Anthropic이 401을 반환하면 두 화면 대신 **"Auth failed! / Redo
+  setup-token"**이 뜬다 - 토큰이 만료됐거나 폐기된 것. `claude setup-token`을
+  다시 실행하고 `secrets.h`를 갱신할 것.
+
+폴링은 기본적으로 2분마다 일어난다 (`main.cpp`의 `REFRESH_INTERVAL_MS`) -
+매번 최소한이라도 실제 API 호출이라서, 몇 초마다 두드릴 필요는 없다.
+
+## 레이아웃 도구
+
+[`lcd_editor.html`](lcd_editor.html)은 위 화면들을 목업할 때 쓴 독립형
+오프라인 레이아웃 디자이너다 - 브라우저에서 열어 18x2 칸에 바로 타이핑하면
+그 레이아웃에 맞는 `lcd.setCursor(col, row)` / `lcd.print("...")` 코드를
+생성해준다. 빌드 과정도, 의존성도 없다.
+
+## 문제 해결
+
+- **LCD가 비거나 깨져 보임** - 백팩의 명암비 가변저항을 조정할 것. 시리얼
+  모니터 로그에서 감지된 I2C 주소도 확인해볼 것 (일부 백팩은 흔한 `0x27`
+  대신 `0x3F`를 쓴다 - 펌웨어가 버스를 자동 스캔하니 이건 그냥 본인 확인용).
+- **"Connecting WiFi"에서 멈춤** - ESP32-C3는 2.4GHz WiFi만 지원한다. 5GHz
+  전용 SSID를 가리키고 있는 건 아닌지 확인할 것.
+- **매번 "DISCONN r=2"(AUTH_EXPIRE)에서 멈춤, 비밀번호는 맞고 스캔에도
+  네트워크가 보임** - 일부 ESP32-C3 SuperMini/클론 보드는 기본 TX 출력이
+  반사되어 인증 핸드셰이크 자체를 깨뜨리는 실제 안테나 임피던스 매칭 결함이
+  있다. 어느 AP에 붙든 동일하게 실패한다
+  ([arduino-esp32 #6767](https://github.com/espressif/arduino-esp32/issues/6767)).
+  펌웨어가 이미 이걸 우회하고 있어서 (`connectWiFi()`의 `WiFi.begin()`
+  직후에 `WiFi.setTxPower(WIFI_POWER_8_5dBm)` 호출) 따로 할 일은 없다 - 다만
+  WiFi 코드를 수정하다가 이 증상이 다시 나타난다면 이유는 이것이다.
+- **화면에 "Auth failed!" / 시리얼 로그에 HTTP 401** - OAuth 토큰이
+  만료됐거나 폐기된 것. `claude setup-token`을 다시 실행하고 `secrets.h`를
+  갱신한 뒤 재플래시할 것.
+- **401 말고 다른 HTTP 에러로 계속 stale(`!`) 상태** - ESP32가 (LAN뿐 아니라)
+  실제 인터넷 접속이 되는지 확인할 것.
+- **카운트다운/리셋 줄이 시각 대신 `--`로 나옴** - 리셋 화면들은 실제
+  시각이 필요해서 펌웨어가 NTP로 시계를 맞춘다 (`setup()`의
+  `configTime()`). WiFi가 붙은 직후 몇 초간은 `--`가 나오는 게 정상이다.
+  계속 안 없어진다면 ESP32가 진짜 인터넷 접속이 되는지(NTP는 HTTP(S)가
+  아니라 UDP/123 아웃바운드가 필요하다), 그리고 마지막 폴링에서 리셋
+  헤더가 실제로 왔는지 확인할 것 (시리얼 로그의 `[API] HTTP` 부근 확인 -
+  헤더 이름/형식을 조정해야 한다면 `main.cpp`의 `fetchUsage()`에서
+  `sessionResetEpoch =` 위 주석 참고).
+
+## 보안 참고사항
+
+버튼이 달린 보드용으로 만들어져서 토큰을 PIN으로 암호화해 저장하는
+claude-usage-stick과 달리, 이 프로젝트는 OAuth 토큰을 `secrets.h`/플래시에
+평문으로 저장한다 - WiFi 비밀번호를 저장하는 방식과 똑같다. 본인 책상 위에
+놓인 개인용 기기라면 합리적인 트레이드오프지만, 보드나 컴파일된 펌웨어에
+물리적/USB로 접근할 수 있는 사람이라면 누구든 꺼낼 수 있다. 이게 신경 쓰인다면
+claude-usage-stick의 `crypto.cpp`(AES-256-GCM + PIN)를 참고할 것 - PIN 입력용
+버튼만 있으면 되는데, 이 빌드는 그게 배선되어 있지 않다.
+
+## 면책 조항
+
+이건 비공식 커뮤니티 프로젝트로, Anthropic과 제휴하거나 승인받지 않았다.
+Claude Code 클라이언트 밖에서 개인 Claude Code OAuth 토큰을 재사용해 Claude
+Code 자신이 읽는 것과 같은 rate-limit 헤더를 폴링한다 - Anthropic이 언제든
+이를 변경하거나 제한할 수 있다. 본인 책임 하에 사용할 것. 토큰은 이 기기에서
+`api.anthropic.com`으로만 직접 전달되며, 어떤 제3자에게도 전송되지 않는다.
+
+## 크레딧
+
+- [eddmann/ClaudeMeter](https://github.com/eddmann/ClaudeMeter) - 원래 영감
+  (macOS 메뉴바 앱; 이 프로젝트는 직접-API 방식으로 바꾸기 전엔 이 앱의
+  하드웨어 동반 기기로 시작했다)
+- [oauramos/claude-usage-stick](https://github.com/oauramos/claude-usage-stick) -
+  여기서 쓰는 OAuth + rate-limit-header 기법과 CA 번들의 출처 (MIT)
+- [caffentrager/esp32-wifi-fix-kit](https://github.com/caffentrager/esp32-wifi-fix-kit) -
+  여기서 stale-NVS-cache 정리와 방어적 HT20 대역폭 강제에 쓰는
+  `Esp32WifiFix` 라이브러리(`firmware/lib/Esp32WifiFix/`)의 출처. 사실 이
+  프로젝트에서 진행한 WiFi 디버깅(자세한 내용은 [readai.md](readai.md))이
+  그 킷의 AUTH_EXPIRE 근본 원인 설명을 위에서 언급한 안테나 결함 쪽으로
+  정정하게 만든 계기였다 (MIT)
+
+## 라이선스
+
+MIT.

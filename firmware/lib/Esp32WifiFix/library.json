@@ -1,0 +1,8 @@
+{
+  "name": "Esp32WifiFix",
+  "version": "1.0.0",
+  "description": "Reusable fixes for common ESP32 WiFi connection failures: HT40/HT20 channel-width bug, stale NVS auth cache, non-blocking reconnect",
+  "keywords": ["esp32", "wifi", "connectivity"],
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}
