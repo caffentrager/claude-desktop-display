@@ -512,8 +512,11 @@ void renderDebugScreen(int screen, int percent, long countdownSec, int weekdayMo
   Serial.println(strlen(row1));
 }
 
-// Interactive serial-driven debug console, triggered by PIN_DEBUG_BUTTON.
-// Set or step through an arbitrary percent/countdown/weekday/time value
+// Interactive serial-driven debug console, triggered by PIN_DEBUG_BUTTON
+// or by typing "d" over serial during normal operation
+// (checkSerialDebugTrigger()) - no physical access to the board needed
+// once it's connected over USB. Set or step through an arbitrary
+// percent/countdown/weekday/time value
 // from the serial monitor and it renders immediately via
 // renderDebugScreen() (the same primitives the real screens use), so any
 // value - including ones nobody thought to hardcode - can be inspected on
@@ -886,6 +889,20 @@ void checkDebugButton() {
   debugButtonLastReading = reading;
 }
 
+// Lets debug mode be entered from the serial monitor ("d") as well as the
+// physical button - no physical access to the board needed once it's
+// already connected over USB. Any other line typed during normal
+// operation is just discarded; nothing else in loop() reads Serial input.
+void checkSerialDebugTrigger() {
+  if (!Serial.available()) return;
+  char line[8];
+  size_t n = Serial.readBytesUntil('\n', line, sizeof(line) - 1);
+  line[n] = '\0';
+  if (n > 0 && (line[0] == 'd' || line[0] == 'D')) {
+    runSerialDebugMode();
+  }
+}
+
 void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
@@ -902,6 +919,7 @@ void loop() {
 
   checkScreenButton();
   checkDebugButton();
+  checkSerialDebugTrigger();
 
   if (millis() - lastScreenSwitchMs >= SCREEN_ROTATE_MS) {
     currentScreen = (currentScreen + 1) % SCREEN_COUNT;

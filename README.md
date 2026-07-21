@@ -32,8 +32,9 @@ this project's original inspiration, does).
 - One or two momentary push buttons (both optional):
   - Screen button - manually switches screens; without it the display
     just rotates on its own
-  - Debug button - runs a one-shot on-screen self-test (see
-    [Debug mode](#debug-mode) below); harmless to omit
+  - Debug button - opens the serial debug console (see
+    [Debug mode](#debug-mode) below); harmless to omit, since typing `d`
+    over serial does the same thing
 - Jumper wires
 
 ### Wiring
@@ -161,11 +162,13 @@ no need to hit it every few seconds.
 
 ## Debug mode
 
-If the debug button is wired (GPIO21), pressing it opens an interactive
-console over the serial port instead of running an automatic sweep -
-useful for checking exactly how the display behaves for one specific
-value (say, "100% with 59 minutes left") without waiting for live usage
-data or the real calendar/clock to pass through it.
+Pressing the debug button (GPIO21, if wired) - or just typing `d` in the
+serial monitor during normal operation, no button needed once the board
+is connected over USB - opens an interactive console over the serial
+port instead of running an automatic sweep. Useful for checking exactly
+how the display behaves for one specific value (say, "100% with 59
+minutes left") without waiting for live usage data or the real
+calendar/clock to pass through it.
 
 With the serial monitor open (`pio device monitor`), type one command
 per line and press Enter:

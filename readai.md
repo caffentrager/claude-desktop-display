@@ -309,7 +309,13 @@ This is the part most likely to surprise a future reader:
   (GPIO2/8/9 are ESP32-C3's strapping pins).
 - `runSerialDebugMode()` (triggered by `PIN_DEBUG_BUTTON`, replaced the
   old automatic-sweep `runDebugTest()` on 2026-07-22) is a blocking
-  interactive console read from `Serial` - set or step an arbitrary
+  interactive console read from `Serial`. Also triggered by typing `d`
+  over serial during normal operation (`checkSerialDebugTrigger()`,
+  called from `loop()` right after `checkDebugButton()`) - added so the
+  console doesn't require physical access to the board once it's
+  connected over USB; any other line typed during normal operation is
+  silently discarded, since nothing else in this codebase reads Serial
+  input outside of debug mode. Set or step an arbitrary
   percent/countdown/weekday/time/stale value and it renders immediately
   via `renderDebugScreen()`, which calls the *same* `drawBar()` and
   builds row 1 the same way `render()` does, so debug mode always
