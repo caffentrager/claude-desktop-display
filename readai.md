@@ -160,7 +160,7 @@ worth knowing since it moved around twice in one session:
   read more like a loading bar.
 - 5: `LOGO_CHAR`, a small original sparkle/starburst (not a reproduction
   of any real logo - 5x8 monochrome pixels can't meaningfully do that
-  anyway), shown on the boot splash (`"Claude <sparkle>"` / `"Desktop
+  anyway), shown on the boot splash (`"<sparkle> Claude"` / `"Desktop
   Display"`, two rows, in `setup()` before WiFi connects), at the end of
   row 0 on screens 0/1 (always fits, since `BAR_WIDTH` is sized to leave
   exactly enough room for it), and at the end of row 1 too if there's

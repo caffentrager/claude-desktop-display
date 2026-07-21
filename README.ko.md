@@ -90,7 +90,7 @@ pio device monitor
 `LCD_COLS`/`LCD_ROWS`만 바꾸면 된다 - 사용률 막대가 설정한 폭에 맞춰
 자동으로 넓어지거나 좁아진다.
 
-처음 전원을 넣으면 WiFi 연결을 시작하기 전에 잠깐 "Claude ✳" / "Desktop
+처음 전원을 넣으면 WiFi 연결을 시작하기 전에 잠깐 "✳ Claude" / "Desktop
 Display" 두 줄짜리 스플래시가 뜬다 (✳는 작은 커스텀 반짝임 문자이고, 실제
 로고를 재현한 건 아니다).
 

@@ -95,7 +95,7 @@ progress, and each poll's HTTP status. If your LCD isn't 18x2, change
 `LCD_COLS` / `LCD_ROWS` at the top of `firmware/src/main.cpp` - the usage
 bar automatically widens or narrows to fill whatever width you set.
 
-On first power-up you'll briefly see a two-line "Claude ✳" / "Desktop
+On first power-up you'll briefly see a two-line "✳ Claude" / "Desktop
 Display" splash (the ✳ is a small custom sparkle character, not a
 reproduction of any real logo) before it moves on to connecting WiFi.
 
