@@ -14,11 +14,15 @@ setup/wiring/troubleshooting.
   `env:esp32-c3`, board id `esp32-c3-devkitm-1` but tested on SuperMini
   clones too).
 - `lcd_editor.html` (repo root) is a standalone, offline HTML/JS layout
-  mockup tool - type into an 18-column x 2-row grid, get back matching
-  `lcd.setCursor()`/`lcd.print()` C++ snippets. No build, no server, no
-  dependency on the rest of this repo; it's a design aid, not something
-  the firmware includes or runs. The screen layouts in `main.cpp`'s
-  `render()` were designed with it.
+  grid - type into an 18-column x 2-row grid to preview a layout visually
+  before committing to it in code. Purely a visual aid, no code
+  generation (that feature existed early on and was deliberately removed
+  - see git history), no build, no server, no dependency on the rest of
+  this repo. Its grid is still 18 columns wide even though this device's
+  real LCD turned out to be 16 (see the `LCD_COLS` note below) - it
+  hasn't been resized to match, so treat it as an approximate mockup, not
+  a pixel-accurate preview. The screen layouts in `main.cpp`'s `render()`
+  were originally designed with it.
 
 ## Key design decisions
 
@@ -37,10 +41,17 @@ setup/wiring/troubleshooting.
   confirmed (see the comment in `firmware/platformio.ini`).
 - LCD is HD44780 over a PCF8574 I2C backpack; firmware auto-scans the I2C
   bus for the backpack's address (`scanForLcdAddress()` in `main.cpp`)
-  rather than hardcoding `0x27` vs `0x3F`. This device's actual LCD is
-  18x2 (`LCD_COLS`/`LCD_ROWS` default) - 16x2/20x4 also work by changing
-  those two constants; `BAR_WIDTH` derives from `LCD_COLS` so the bar
-  always fills the row exactly, see below.
+  rather than hardcoding `0x27` vs `0x3F`. This device's actual LCD only
+  shows **16 columns** (`LCD_COLS=16`) - assumed to be 18x2 from the
+  project's very start and never questioned until a decoration silently
+  landed off-screen; confirmed on real hardware on 2026-07-22 via the
+  serial debug console's `r` command (`r0123456789ABCDEFGH` printed one
+  character per column, and only through `F` - column 15 - ever showed up
+  on the glass). 18x2/20x4 also work by changing `LCD_COLS`/`LCD_ROWS`;
+  `BAR_WIDTH` derives from `LCD_COLS` so the bar always fills the row
+  exactly, see below. **If this is ever ported to a different physical
+  LCD, verify its real visible width the same way instead of trusting
+  whatever the seller/datasheet claims.**
 - `render()` only touches the I2C bus when something actually changed.
   Row 0 (label + bar) is tracked by a small change-detection key
   (`renderedRow0Key`) rather than literal text, since the bar's on-screen
@@ -90,15 +101,14 @@ below) are each 2 rows:
   (2 + 1 + BAR_WIDTH + 1 + 1) always totals exactly `LCD_COLS` - the bar
   fills whatever's left over instead of leaving unused columns, whatever
   LCD_COLS is set to.
-- Row 1: the exact percentage as a number, plus a time detail, plus the
-  same sparkle again at the very end *if it fits* (`render()` measures
-  `strlen(row1)` and only appends `LOGO_CHAR` (plus 2 leading spaces on
-  screen 1 only, 0 on screen 0 - see the CGRAM slot-5 note below) when it
-  fits - on this device's 18-col LCD it always does, exactly: screen 0's
-  worst case "100% 6h 59m Left!" is 17 chars + 0 gap + 1 logo = 18;
-  screen 1's worst case "100% Fri 19:00!" is 15 chars + 2 gap + 1 logo =
-  18. This degrades gracefully instead of truncating real content on a
-  narrower `LCD_COLS`, though):
+- Row 1: the exact percentage as a number, plus a time detail, plain
+  text, no decoration (`render()` no longer appends the sparkle here at
+  all as of 2026-07-22 - see the CGRAM slot-5 note below for why it was
+  removed). When `dataStale` is true, the time detail is replaced
+  outright with `"OLD"` rather than appended to - always short enough to
+  never risk pushing row 1 past the visible edge regardless of percent
+  width, and paired with row 0's logo going blank under the same
+  condition for a second, redundant signal:
   - Screen 0 ("5H"): `formatCountdown()` - a relative "3h 5m" countdown to
     when the 5-hour window resets (lowercase with a space, not "3H5M" -
     reads more like ordinary text; minutes still aren't zero-padded -
@@ -130,8 +140,9 @@ needed for a quick glance: `"5H<pct> <countdown>"` /
   a host-side Python length check before flashing (see git history for
   the fix commit). If you add anything to this screen, recheck the
   100%-on-both-metrics case fits.
-- No bar graphs (no room) and no stale/`!` marker - this screen trades
-  those for compactness; check the dedicated screens for that detail.
+- No bar graphs (no room) and no stale indicator (no logo to blank, no
+  "OLD" override) - this screen trades those for compactness; check the
+  dedicated screens for that detail.
 
 CGRAM (8 slots, 0-7) has 1 free slot (7). The full allocation history is
 worth knowing since it moved around twice in one session:
@@ -160,13 +171,20 @@ worth knowing since it moved around twice in one session:
 - 5: `LOGO_CHAR`, a small original sparkle/starburst (not a reproduction
   of any real logo - 5x8 monochrome pixels can't meaningfully do that
   anyway), shown on the boot splash (`"<sparkle> Claude"` / `"Desktop
-  Display"`, two rows, in `setup()` before WiFi connects), at the end of
-  row 0 on screens 0/1 (always fits, since `BAR_WIDTH` is sized to leave
-  exactly enough room for it), and at the end of row 1 too if there's
-  space left over (see the row 1 note above) - attached directly (no
-  gap) on screen 0, 2 cells of gap on screen 1 (widened from 1 on
-  request), so the two screens don't look identical in how tightly it
-  sits against the preceding text.
+  Display"`, two rows, in `setup()` before WiFi connects) and at the end
+  of row 0 on screens 0/1 (always fits, since `BAR_WIDTH` is sized to
+  leave exactly enough room for it). Doubles as the freshness indicator:
+  `render()` prints a blank space instead of `LOGO_CHAR` there when
+  `dataStale` is true, paired with row 1's `"OLD"` override (see above)
+  for two redundant signals instead of one. Used to *also* appear at the
+  end of row 1 (with a compensating gap for single- vs double-digit
+  countdown minutes, to keep its column stable across the digit-count
+  boundary) until `LCD_COLS` was corrected from an assumed 18 to the real
+  16 on 2026-07-22 - at 16 columns there's no longer reliable room for it
+  there across every percent/countdown-length combination, so it was
+  removed from row 1 entirely rather than chasing more edge cases; see
+  git history if the old compensating-gap approach is ever relevant
+  again.
 - 6: `EMPTY_MID_CHAR` - just a top/bottom line, no sides. **Used for
   every empty bar cell uniformly, including the first and last cells -
   no special bracket-shaped end-cap.** This went through two redesigns in
@@ -289,29 +307,43 @@ This is the part most likely to surprise a future reader:
   board/config that uses the classic UART0. If either ever needs to
   change again, prefer another free, non-strapping, non-SDA/SCL pin
   (GPIO2/8/9 are ESP32-C3's strapping pins).
-- `runDebugTest()` (triggered by `PIN_DEBUG_BUTTON`) is a blocking ~25s,
-  4-phase self-test:
-  1. Sweeps `drawBar()` through percent 0-99 (120ms/step), lingering 3s
-     on the p==0 frame first so the all-empty state is actually visible
-     before the sweep starts moving rather than flashing by at the same
-     pace as every other step.
-  2. Cycles all 7 weekday abbreviations through the same `"%s HH:MM"`
-     format `formatResetDay()` uses (hardcoded to a fixed time, not run
-     through `formatResetDay()` itself, since driving that function
-     through all 7 weekdays would need 7 fake epoch values - simpler to
-     just test the display format directly).
-  3. Sweeps the clock display `"%02d:00"` from hour 0 through 24
-     inclusive (150ms/step) - 24 is included deliberately as a
-     display-sweep boundary (checking the two-digit format renders for
-     every value), not a claim the device ever shows a real "24:00".
-  4. Sweeps `"00:%02d"` from minute 0 through 59 (100ms/step), hour held
-     at 0 - phase 3 only ever showed ":00", so this is the other half of
-     the two-digit range that phase needed but didn't cover.
+- `runSerialDebugMode()` (triggered by `PIN_DEBUG_BUTTON`, replaced the
+  old automatic-sweep `runDebugTest()` on 2026-07-22) is a blocking
+  interactive console read from `Serial` - set or step an arbitrary
+  percent/countdown/weekday/time/stale value and it renders immediately
+  via `renderDebugScreen()`, which calls the *same* `drawBar()` and
+  builds row 1 the same way `render()` does, so debug mode always
+  exercises the real positioning logic instead of a separate copy that
+  could quietly drift out of sync. Commands, one per line, no Arduino
+  `String` (kept to fixed `char` buffers + `atoi`/`sscanf`, matching this
+  file's existing style):
+  - `p<0-100>` - set percent (whichever screen is currently showing)
+  - `t<h>:<m>` - 5H screen, set countdown to h hours m minutes left
+  - `w<0-6>` - WK screen, set weekday (0=Mon..6=Sun, converted internally
+    to `formatResetDay()`'s Sun-first `wdays[]` indexing via the same
+    `mondayFirst[]` remap the old sweep used)
+  - `k<h>:<m>` - WK screen, set reset time of day
+  - `+`/`-` - step whichever field a preceding p/t/w/k command last
+    touched (tracked via `DebugField field`), wrapping/clamping per field
+    (percent clamps 0-100; weekday wraps mod 7; time wraps the minute
+    into the hour)
+  - `r<text>` - print `<text>` on row 1 as-is, bypassing all layout logic
+    entirely - added specifically to find this device's real 16-column
+    width (see the `LCD_COLS` note above), generally useful for mapping
+    any LCD's actual visible columns
+  - `s` - toggle a local `stale` bool, exercising the same blank-logo/
+    `"OLD"` behavior `render()` uses for `dataStale`, without touching
+    the real global - debug mode never touches `sessionUtilization` /
+    `weeklyUtilization` / `dataStale` / `currentScreen` etc., it's fully
+    isolated from live state
+  - `q` - quit back to normal operation
 
-  Exists so the full range of all four can be eyeballed on the real
-  hardware without waiting for live usage data or the real calendar/clock
-  to naturally pass through every value. Ends with `forceRedraw()` so
-  normal operation resumes cleanly.
+  Every command re-renders and echoes row 1's exact text and length back
+  over `Serial` (`[DBG] ... row1="..." len=...`), which is what made it
+  possible to verify the `LCD_COLS` fix and the row-1-logo-removal
+  redesign against the actual compiled firmware's output rather than just
+  reasoning about it. Ends with `forceRedraw()` on `q` so normal
+  operation resumes cleanly.
 
 ## Naming note
 

@@ -13,10 +13,14 @@
 #include "certs.h"
 
 // ---- Display size ----
-// This device's actual LCD is 18x2. 16x2 and 20x4 also work - just change
-// these two; BAR_WIDTH below scales to fill whatever width is set, so the
-// bar always uses the full row instead of leaving it partly blank.
-#define LCD_COLS 18
+// This device's LCD was assumed to be 18x2 at the start of the project,
+// but only 16 columns are actually visible on the real glass (confirmed
+// 2026-07-22 via the serial debug console's "r" command: a distinct
+// character printed in every column, columns 16-17 never showed up).
+// 20x4 also works - just change these two; BAR_WIDTH below scales to fill
+// whatever width is set, so the bar always uses the full row instead of
+// leaving it partly blank.
+#define LCD_COLS 16
 #define LCD_ROWS 2
 
 // Wiring: SDA -> GPIO4, SCL -> GPIO5
@@ -35,10 +39,12 @@
 
 // Second button, same wiring style (one leg to GND, internal pull-up) -
 // GPIO21 is UART0 TX, unused for the same reason GPIO20 (UART0 RX) is
-// free. Runs a one-shot visual self-test (runDebugTest()) instead of
-// switching screens: sweeps the bar 0-99% and cycles all 7 weekday
-// labels, so both can be checked by eye without waiting for real usage
-// data to naturally pass through every value.
+// free. Enters an interactive serial-driven debug console
+// (runSerialDebugMode()) instead of switching screens: set or step
+// through an arbitrary percent/countdown/weekday/time value from the
+// serial monitor and it renders immediately using the same primitives the
+// real 5H/WK screens use, so any value can be inspected on demand instead
+// of waiting for real usage data or the clock to pass through it.
 #define PIN_DEBUG_BUTTON 21
 
 // This calls the real Anthropic API every poll, so don't hammer it. 120s
@@ -361,8 +367,16 @@ void renderCombinedScreen() {
 }
 
 // Row 0: "5H"/"WK" label + a BAR_WIDTH-cell bar graph of the percentage,
-// plus a decorative sparkle in the spare columns to the right of the bar.
-// Row 1: the percentage as a number + the countdown/reset-day detail.
+// plus a sparkle in the last column that doubles as the freshness
+// indicator - LOGO_CHAR when the data's current, blank when dataStale.
+// Row 1: the percentage as a number + the countdown/reset-day detail,
+// plain text, no decoration - this device's LCD only has 16 real columns
+// (see LCD_COLS above), which doesn't leave reliable room for a trailing
+// sparkle here across every percent/countdown-length combination, so the
+// staleness signal moved off row 1's variable-length end: row 0's logo
+// blanks out, and row 1 shows "OLD" in place of the countdown/reset-day
+// detail (see below) - two fixed-width signals instead of an appended "!"
+// that could push row 1 past the visible edge.
 void render() {
   if (authFailed) {
     if (!renderedAuthFailed) {
@@ -394,7 +408,11 @@ void render() {
     lcd->print(' ');
     drawBar(0, strlen(label) + 1, percent < 0 ? 0 : percent);
     lcd->print(' ');
-    lcd->write(LOGO_CHAR);
+    if (dataStale) {
+      lcd->print(' ');
+    } else {
+      lcd->write(LOGO_CHAR);
+    }
     strncpy(renderedRow0Key, row0Key, sizeof(renderedRow0Key) - 1);
     renderedRow0Key[sizeof(renderedRow0Key) - 1] = '\0';
   }
@@ -402,8 +420,15 @@ void render() {
   char pctStr[5];
   formatPercent(pctStr, sizeof(pctStr), percent);
 
+  // When stale, "OLD" replaces the countdown/reset-day detail outright
+  // (rather than being appended to it) - short enough to never risk
+  // pushing row 1 past the visible edge regardless of percent width, and
+  // paired with the blank row-0 logo above for a second, harder-to-miss
+  // signal than either alone.
   char detail[LCD_COLS + 1];
-  if (currentScreen == 0) {
+  if (dataStale && percent >= 0) {
+    snprintf(detail, sizeof(detail), "OLD");
+  } else if (currentScreen == 0) {
     char countdown[8];
     formatCountdown(countdown, sizeof(countdown), sessionResetEpoch);
     if (strcmp(countdown, "--") == 0) {
@@ -416,24 +441,7 @@ void render() {
   }
 
   char row1[LCD_COLS + 1];
-  snprintf(row1, sizeof(row1), "%s %s%s", pctStr, detail, dataStale && percent >= 0 ? "!" : "");
-
-  // Tack the sparkle on at the very end, but only if it actually fits -
-  // on this device's 18-col LCD it always does (worst case for WK:
-  // "100% Fri 19:00!" is 15 chars, +2 gap +1 logo = 18 exactly), but this
-  // stays correct on a narrower LCD_COLS build too by just skipping the
-  // decoration instead of truncating real content. 5H attaches it
-  // directly against "Left" (no gap); WK sits 2 cells back from the
-  // time, so the two screens don't look identical in how tightly the
-  // sparkle sits (widened from 1 to 2 cells on request).
-  int logoGap = (currentScreen == 0) ? 0 : 2;
-  size_t row1Len = strlen(row1);
-  if (row1Len + logoGap + 1 <= (size_t)LCD_COLS) {
-    size_t pos = row1Len;
-    for (int g = 0; g < logoGap; g++) row1[pos++] = ' ';
-    row1[pos++] = (char)LOGO_CHAR;
-    row1[pos] = '\0';
-  }
+  snprintf(row1, sizeof(row1), "%s %s", pctStr, detail);
 
   if (LCD_ROWS > 1 && strcmp(row1, renderedRow1) != 0) {
     lcdPrintRow(1, row1);
@@ -442,78 +450,183 @@ void render() {
   }
 }
 
-// One-shot visual self-test, triggered by PIN_DEBUG_BUTTON: sweeps the
-// real drawBar() through every percentage 0-99, cycles all 7 weekday
-// labels, sweeps the hour display 00:00-24:00, then sweeps the minute
-// display 00-59 (hour held at 0) - so all four can be checked by eye on
-// the actual hardware without waiting for live usage data or the real
-// calendar/clock to happen to pass through every value. Blocking (like
-// connectWiFi()'s diagnostic screens) - normal operation resumes right
-// after via forceRedraw().
-void runDebugTest() {
-  lcd->clear();
-  lcd->setCursor(0, 0);
-  lcd->print("DEBUG: bar 0-99%");
-  delay(600);
+// One "field" the serial debug console can set or step through; +/- acts
+// on whichever field a preceding p/t/w/k command last touched.
+enum DebugField { DEBUG_FIELD_PERCENT, DEBUG_FIELD_COUNTDOWN, DEBUG_FIELD_WEEKDAY, DEBUG_FIELD_TIME };
 
-  for (int p = 0; p <= 99; p++) {
-    lcd->setCursor(0, 0);
-    lcd->print("5H ");
-    drawBar(0, 3, p);
-    char row1[LCD_COLS + 1];
-    snprintf(row1, sizeof(row1), "test %d%%", p);
-    lcdPrintRow(1, row1);
-    // Linger on the very first (0%, all-empty) frame so it's actually
-    // visible before the sweep starts moving, instead of flashing by at
-    // the same 120ms pace as every other step.
-    delay(p == 0 ? 3000 : 120);
-  }
-
-  lcd->clear();
-  lcd->setCursor(0, 0);
-  lcd->print("DEBUG: weekdays");
-  delay(600);
-
+// Renders one frame of the serial debug console using the exact same
+// primitives (drawBar(), the real screens use for row 0), then echoes
+// row1 back over Serial. Row 0 is only echoed as its label/percent, not
+// reconstructed as text, since its bar cells are CGRAM bytes with no
+// printable representation and the bar's own fill arithmetic (drawBar())
+// isn't what's in question here.
+void renderDebugScreen(int screen, int percent, long countdownSec, int weekdayMonFirst, int timeHour,
+                        int timeMin, bool stale) {
   static const char *wdays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-  static const int mondayFirst[] = {1, 2, 3, 4, 5, 6, 0};  // Mon..Sun, matching how the user asked for it
-  for (int i = 0; i < 7; i++) {
-    char row1[LCD_COLS + 1];
-    snprintf(row1, sizeof(row1), "%s 19:00", wdays[mondayFirst[i]]);
-    lcdPrintRow(1, row1);
-    delay(500);
+  static const int mondayFirst[] = {1, 2, 3, 4, 5, 6, 0};  // command index (0=Mon) -> wdays[] index
+
+  const char *label = screen == 0 ? "5H" : "WK";
+  lcd->setCursor(0, 0);
+  lcd->print(label);
+  lcd->print(' ');
+  drawBar(0, strlen(label) + 1, percent);
+  lcd->print(' ');
+  if (stale) {
+    lcd->print(' ');
+  } else {
+    lcd->write(LOGO_CHAR);
   }
 
-  lcd->clear();
-  lcd->setCursor(0, 0);
-  lcd->print("DEBUG: 00-24h");
-  delay(600);
+  char pctStr[5];
+  formatPercent(pctStr, sizeof(pctStr), percent);
 
-  // Hour 24 is included as its own step (not wrapped to "00:00" the next
-  // day) since this is a display sweep, not a real clock - the point is
-  // seeing every two-digit hour value render, including that boundary.
-  for (int h = 0; h <= 24; h++) {
-    char row1[LCD_COLS + 1];
-    snprintf(row1, sizeof(row1), "%02d:00", h);
-    lcdPrintRow(1, row1);
-    delay(150);
+  char detail[LCD_COLS + 1];
+  if (stale) {
+    snprintf(detail, sizeof(detail), "OLD");
+  } else if (screen == 0) {
+    long hours = countdownSec / 3600;
+    long mins = (countdownSec % 3600) / 60;
+    char countdown[8];
+    if (hours == 0) {
+      snprintf(countdown, sizeof(countdown), "%ldm", mins);
+    } else {
+      snprintf(countdown, sizeof(countdown), "%ldh %ldm", hours, mins);
+    }
+    snprintf(detail, sizeof(detail), "%s Left", countdown);
+  } else {
+    snprintf(detail, sizeof(detail), "%s %02d:%02d", wdays[mondayFirst[weekdayMonFirst]], timeHour, timeMin);
   }
 
-  lcd->clear();
-  lcd->setCursor(0, 0);
-  lcd->print("DEBUG: 00-59m");
-  delay(600);
+  char row1[LCD_COLS + 1];
+  snprintf(row1, sizeof(row1), "%s %s", pctStr, detail);
+  lcdPrintRow(1, row1);
 
-  // Hour held at 0 - the hour sweep above already covered every hour
-  // value, so this phase isolates the minute digits (00-59) instead.
-  for (int m = 0; m <= 59; m++) {
-    char row1[LCD_COLS + 1];
-    snprintf(row1, sizeof(row1), "00:%02d", m);
-    lcdPrintRow(1, row1);
-    delay(100);
+  Serial.print(F("[DBG] "));
+  Serial.print(label);
+  Serial.print(F(" percent="));
+  Serial.print(percent);
+  Serial.print(stale ? F(" stale=1") : F(" stale=0"));
+  Serial.print(F(" row1=\""));
+  Serial.print(row1);
+  Serial.print(F("\" len="));
+  Serial.println(strlen(row1));
+}
+
+// Interactive serial-driven debug console, triggered by PIN_DEBUG_BUTTON.
+// Set or step through an arbitrary percent/countdown/weekday/time value
+// from the serial monitor and it renders immediately via
+// renderDebugScreen() (the same primitives the real screens use), so any
+// value - including ones nobody thought to hardcode - can be inspected on
+// demand instead of waiting for live usage data or the real clock to pass
+// through it. Blocking (like connectWiFi()'s diagnostic screens); "q"
+// exits back to normal operation via forceRedraw().
+//
+// Commands, one per line:
+//   p<0-100>   set percent (applies to whichever screen is showing)
+//   t<h>:<m>   5H screen, set countdown to h hours m minutes left
+//   w<0-6>     WK screen, set weekday (0=Mon..6=Sun)
+//   k<h>:<m>   WK screen, set reset time of day
+//   +  -       step the last-set field (percent/countdown/weekday/time) by one unit
+//   r<text>    print <text> on row 1 as-is, bypassing all layout logic -
+//              for mapping which columns are actually visible on the glass
+//   s          toggle the stale indicator (blank row-0 logo + row-1 "OLD")
+//   q          quit back to normal operation
+void runSerialDebugMode() {
+  int screen = 0;
+  DebugField field = DEBUG_FIELD_PERCENT;
+  int percent = 50;
+  long countdownSec = 65L * 60;  // 1h 5m - an arbitrary non-edge starting point
+  int weekday = 0;               // 0=Mon..6=Sun
+  int timeHour = 9, timeMin = 0;
+  bool stale = false;
+
+  lcd->clear();
+  Serial.println(
+      F("[DBG] serial debug mode - commands: p<0-100> t<h>:<m> w<0-6> k<h>:<m> r<text> s + - q"));
+  renderDebugScreen(screen, percent, countdownSec, weekday, timeHour, timeMin, stale);
+
+  while (true) {
+    if (!Serial.available()) {
+      delay(20);
+      continue;
+    }
+
+    char line[24];
+    size_t n = Serial.readBytesUntil('\n', line, sizeof(line) - 1);
+    line[n] = '\0';
+    while (n > 0 && (line[n - 1] == '\r' || line[n - 1] == ' ')) line[--n] = '\0';
+    char *p = line;
+    while (*p == ' ') p++;
+    if (*p == '\0') continue;
+
+    if (*p == 'q' || *p == 'Q') {
+      break;
+    } else if (*p == '+' || *p == '-') {
+      int dir = (*p == '+') ? 1 : -1;
+      switch (field) {
+        case DEBUG_FIELD_PERCENT:
+          percent = constrain(percent + dir, 0, 100);
+          break;
+        case DEBUG_FIELD_COUNTDOWN:
+          countdownSec = max(0L, countdownSec + dir * 60L);
+          break;
+        case DEBUG_FIELD_WEEKDAY:
+          weekday = ((weekday + dir) % 7 + 7) % 7;
+          break;
+        case DEBUG_FIELD_TIME:
+          timeMin += dir;
+          if (timeMin >= 60) {
+            timeMin = 0;
+            timeHour = (timeHour + 1) % 24;
+          } else if (timeMin < 0) {
+            timeMin = 59;
+            timeHour = (timeHour + 23) % 24;
+          }
+          break;
+      }
+    } else if (*p == 'p' || *p == 'P') {
+      percent = constrain(atoi(p + 1), 0, 100);
+      field = DEBUG_FIELD_PERCENT;
+    } else if (*p == 't' || *p == 'T') {
+      long h = 0, m = 0;
+      sscanf(p + 1, "%ld:%ld", &h, &m);
+      countdownSec = max(0L, h * 3600 + m * 60);
+      screen = 0;
+      field = DEBUG_FIELD_COUNTDOWN;
+    } else if (*p == 'w' || *p == 'W') {
+      weekday = ((atoi(p + 1) % 7) + 7) % 7;
+      screen = 1;
+      field = DEBUG_FIELD_WEEKDAY;
+    } else if (*p == 'k' || *p == 'K') {
+      int h = 0, m = 0;
+      sscanf(p + 1, "%d:%d", &h, &m);
+      timeHour = ((h % 24) + 24) % 24;
+      timeMin = ((m % 60) + 60) % 60;
+      screen = 1;
+      field = DEBUG_FIELD_TIME;
+    } else if (*p == 'r' || *p == 'R') {
+      // Raw diagnostic: prints exactly what follows "r" on row 1, one
+      // char per column, bypassing all layout logic - for mapping which
+      // columns are actually visible on the physical glass (e.g. send
+      // "r0123456789ABCDEFGH" and ask which trailing letters disappear).
+      lcdPrintRow(1, p + 1);
+      Serial.print(F("[DBG] raw row1=\""));
+      Serial.print(p + 1);
+      Serial.print(F("\" len="));
+      Serial.println(strlen(p + 1));
+      continue;
+    } else if (*p == 's' || *p == 'S') {
+      stale = !stale;
+    } else {
+      Serial.println(F("[DBG] unknown command"));
+      continue;
+    }
+    renderDebugScreen(screen, percent, countdownSec, weekday, timeHour, timeMin, stale);
   }
 
   lcd->clear();
   forceRedraw();
+  Serial.println(F("[DBG] exiting debug mode"));
 }
 
 void connectWiFi() {
@@ -767,7 +880,7 @@ void checkDebugButton() {
   if (millis() - debugButtonLastChangeMs > BUTTON_DEBOUNCE_MS && reading != debugButtonDebouncedState) {
     debugButtonDebouncedState = reading;
     if (debugButtonDebouncedState == LOW) {
-      runDebugTest();
+      runSerialDebugMode();
     }
   }
   debugButtonLastReading = reading;

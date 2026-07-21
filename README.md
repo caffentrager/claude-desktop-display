@@ -26,8 +26,9 @@ this project's original inspiration, does).
 
 - An ESP32-C3 board (any variant - DevKitM-1, "SuperMini", Xiao ESP32C3, ...)
 - A character LCD with a **PCF8574 I2C backpack** (the common 4-pin
-  GND/VCC/SDA/SCL modules) - 18x2, 16x2, and 20x4 all work, see
-  `LCD_COLS`/`LCD_ROWS` in `firmware/src/main.cpp`
+  GND/VCC/SDA/SCL modules) - this build is configured for 16x2
+  (`LCD_COLS`/`LCD_ROWS` in `firmware/src/main.cpp`); 18x2 and 20x4 also
+  work, just change those two constants to match your module
 - One or two momentary push buttons (both optional):
   - Screen button - manually switches screens; without it the display
     just rotates on its own
@@ -91,9 +92,11 @@ pio device monitor
 ```
 
 The serial monitor shows the LCD's detected I2C address, WiFi connection
-progress, and each poll's HTTP status. If your LCD isn't 18x2, change
+progress, and each poll's HTTP status. If your LCD isn't 16x2, change
 `LCD_COLS` / `LCD_ROWS` at the top of `firmware/src/main.cpp` - the usage
-bar automatically widens or narrows to fill whatever width you set.
+bar automatically widens or narrows to fill whatever width you set. If
+you're not sure how many columns your LCD actually shows, see the `r`
+command in [Debug mode](#debug-mode) below.
 
 On first power-up you'll briefly see a two-line "✳ Claude" / "Desktop
 Display" splash (the ✳ is a small custom sparkle character, not a
@@ -108,13 +111,13 @@ The screen alternates between two views every few seconds
 to the next one immediately instead of waiting:
 
 ```
-5H ██████------- ✳
-42% 3h 5m Left✳
+5H █████------ ✳
+42% 3h 5m Left
 ```
 
 ```
-WK █████████---- ✳
-67% Fri 19:00  ✳
+WK ███████---- ✳
+67% Fri 19:00
 ```
 
 (A thin top/bottom line runs continuously across the whole bar, and each
@@ -122,10 +125,12 @@ cell has a 1-pixel inset gap just inside that border for a more
 loading-bar-like look - `-` marks an empty cell, which is not blank space,
 the bar's boundary stays visible at any fill level, including 0%. The
 bar's actual resolution is finer than whole cells - see below. The
-trailing ✳ on row 2 only shows up if it fits after everything else -
-attached directly on the 5H screen, two cells back on the WK screen. A
-third, combined "both at a glance" screen exists in the code but is
-disabled for now - `SCREEN_COUNT` in `main.cpp`.)
+sparkle at the end of row 1 doubles as a freshness indicator - see the
+"stale" bullet below - row 2 is plain text with no decoration, since this
+device's 16-column LCD doesn't reliably leave room for one across every
+percent/countdown-length combination. A third, combined "both at a
+glance" screen exists in the code but is disabled for now -
+`SCREEN_COUNT` in `main.cpp`.)
 
 - **5H** - utilization of your rolling 5-hour session limit, with a
   countdown to when it resets ("3h 5m", not "3h 05m" - minutes aren't
@@ -139,9 +144,10 @@ disabled for now - `SCREEN_COUNT` in `main.cpp`.)
 - The bar itself has finer-than-one-cell resolution (`BAR_SUBDIV` in
   `main.cpp`, 5 sub-steps per cell) using a few extra custom characters,
   not just filled/empty blocks.
-- A trailing `!` on row 2 means the device hasn't gotten a good reading in
-  a while (WiFi hiccup, API timeout, etc.) - the last known values stay on
-  screen.
+- If the device hasn't gotten a good reading in a while (WiFi hiccup, API
+  timeout, etc.), row 1's sparkle goes blank and row 2's detail switches
+  to "OLD" - the percentage itself is left alone (still the last known
+  reading) so it stays informative rather than disappearing.
 - The time detail reads `--` if the device hasn't yet fetched a valid
   reset time, or (5H screen only) hasn't finished syncing its clock over
   NTP yet (a few seconds after boot/reconnect - see Troubleshooting).
@@ -155,35 +161,46 @@ no need to hit it every few seconds.
 
 ## Debug mode
 
-If the debug button is wired (GPIO21), pressing it runs a ~25-second
-on-screen self-test using the real rendering code - no need to wait for
-live usage data or the calendar/clock to naturally pass through every
-value:
+If the debug button is wired (GPIO21), pressing it opens an interactive
+console over the serial port instead of running an automatic sweep -
+useful for checking exactly how the display behaves for one specific
+value (say, "100% with 59 minutes left") without waiting for live usage
+data or the real calendar/clock to pass through it.
 
-1. Sweeps the bar through every percentage 0-99, so you can eyeball the
-   fill/partial-fill/empty-cell glyphs across the whole range. Lingers on
-   0% for 3 seconds first so that frame is actually visible before the
-   sweep starts moving.
-2. Cycles all 7 weekday labels (Mon through Sun) at a fixed time, so you
-   can check the weekday abbreviations render correctly.
-3. Sweeps the clock display from 00:00 up through 24:00, one hour at a
-   time, so every two-digit hour renders correctly (24:00 is included as
-   a display-sweep boundary, not a claim that the device ever shows a
-   real 24:00).
-4. Sweeps the minute display from 00 through 59 (hour held at 0), so
-   every two-digit minute renders correctly too - the hour sweep above
-   only ever showed ":00".
+With the serial monitor open (`pio device monitor`), type one command
+per line and press Enter:
 
-Normal operation resumes automatically afterward - nothing is saved or
-changed, it's read-only against the display.
+| Command | Effect |
+|---|---|
+| `p<0-100>` | Set percent (applies to whichever screen is showing) |
+| `t<h>:<m>` | 5H screen: set the countdown to `h` hours `m` minutes left |
+| `w<0-6>` | WK screen: set the weekday (`0`=Mon .. `6`=Sun) |
+| `k<h>:<m>` | WK screen: set the reset time of day |
+| `+` / `-` | Step the last-set value (percent/countdown/weekday/time) by one unit |
+| `s` | Toggle the stale indicator (blank row-1 sparkle + row-2 "OLD") |
+| `r<text>` | Print `<text>` on row 2 as-is, bypassing all layout logic |
+| `q` | Quit back to normal operation |
+
+Each command re-renders immediately using the exact same code the real
+5H/WK screens use, and echoes the resulting row 2 text (plus its length)
+back over serial - handy for confirming exactly what's showing without
+having to read tiny LCD characters.
+
+The `r` command is also the easiest way to check how many columns your
+own LCD actually shows: send something like `r0123456789ABCDEFGH` and
+see which trailing characters never appear on the glass (see
+[Troubleshooting](#troubleshooting)).
+
+Normal operation resumes on `q` - nothing is saved or changed, it's
+read-only against the display.
 
 ## Layout tool
 
 [`lcd_editor.html`](lcd_editor.html) is a standalone, offline layout
-designer used to mock up the screens above - open it in any browser,
-type directly into the 18x2 grid of cells, and it generates the matching
-`lcd.setCursor(col, row)` / `lcd.print("...")` calls for whatever you laid
-out. No build step, no dependencies.
+grid used to mock up screens like the ones above - open it in any
+browser and type directly into the cells to see how a layout looks
+before committing to it in code. Purely a visual aid (no code
+generation) - no build step, no dependencies.
 
 ## Troubleshooting
 
@@ -207,8 +224,15 @@ out. No build step, no dependencies.
 - **"Auth failed!" on screen / HTTP 401 in the serial log** - your OAuth
   token expired or was revoked. Re-run `claude setup-token`, update
   `secrets.h`, and reflash.
-- **Stays stale (`!`) with HTTP errors other than 401 in the log** - check
+- **Stays on "OLD" with HTTP errors other than 401 in the log** - check
   the ESP32 actually has internet access (not just LAN).
+- **Text looks cut off on the right, or the row-1 sparkle never
+  appears** - your LCD may show fewer columns than `LCD_COLS` is set to
+  (this project's own unit turned out to only show 16 of an assumed 18).
+  Use the debug console's `r` command to check: press the debug button,
+  then send `r0123456789ABCDEFGH` and see which trailing character is the
+  last one that actually shows up on the glass - that tells you the real
+  usable width. Update `LCD_COLS` to match.
 - **5H screen's countdown shows `--` instead of a time** - it needs the
   device's own clock, synced over NTP (`configTime()` in `setup()`);
   this takes a few seconds after WiFi comes up, and briefly shows `--`
