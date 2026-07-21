@@ -28,8 +28,11 @@ this project's original inspiration, does).
 - A character LCD with a **PCF8574 I2C backpack** (the common 4-pin
   GND/VCC/SDA/SCL modules) - 18x2, 16x2, and 20x4 all work, see
   `LCD_COLS`/`LCD_ROWS` in `firmware/src/main.cpp`
-- A momentary push button (optional - manually switches screens; without
-  it the display just rotates on its own)
+- One or two momentary push buttons (both optional):
+  - Screen button - manually switches screens; without it the display
+    just rotates on its own
+  - Debug button - runs a one-shot on-screen self-test (see
+    [Debug mode](#debug-mode) below); harmless to omit
 - Jumper wires
 
 ### Wiring
@@ -41,10 +44,15 @@ this project's original inspiration, does).
 | SDA | GPIO4 |
 | SCL | GPIO5 |
 
-Button (optional): one leg to **GPIO7**, the other to **GND**. No resistor
-needed - the firmware uses the pin's internal pull-up. If your board
-doesn't break out GPIO7, change `PIN_SCREEN_BUTTON` in `main.cpp` to any
-free pin that isn't SDA/SCL or a strapping pin (GPIO2/8/9 on ESP32-C3).
+Screen button (optional): one leg to **GPIO20**, the other to **GND**.
+Debug button (optional): one leg to **GPIO21**, the other to **GND**.
+Neither needs a resistor - the firmware uses each pin's internal pull-up.
+If your board doesn't break out GPIO20/21, change `PIN_SCREEN_BUTTON` /
+`PIN_DEBUG_BUTTON` in `main.cpp` to any free pins that aren't SDA/SCL or
+strapping pins (GPIO2/8/9 on ESP32-C3). Both are normally UART0 RX/TX -
+fine here since this project's Serial goes over native USB-CDC instead,
+but keep that in mind if you're combining this with other code that
+expects a classic UART.
 
 > Most PCF8574 backpacks and the HD44780 LCD they drive want 5V for a bright
 > backlight/contrast; the I2C bus itself is fine being read by the ESP32-C3's
@@ -95,44 +103,42 @@ That's it - no bridge script, no second machine to keep running.
 
 ## Reading the display
 
-The screen cycles through three views every few seconds
+The screen alternates between two views every few seconds
 (`SCREEN_ROTATE_MS` in `main.cpp`) - press the button (if wired) to jump
 to the next one immediately instead of waiting:
 
 ```
-5H █████▢▢▢▢▢▢▢▢ ✳
-42% 3H12M Left
+5H ██████------- ✳
+42% 3h 5m Left✳
 ```
 
 ```
-WK █████████▢▢▢▢ ✳
-67% Fri 19:00
+WK █████████---- ✳
+67% Fri 19:00  ✳
 ```
 
-```
-5H42% 3H12M
-WK67% Fri 19:00
-```
-
-(`▢` is the bordered "empty slot" glyph, not blank space - it marks the
-bar's boundary even at 0%. The bar's actual resolution is finer than
-whole cells - see below.)
+(A thin top/bottom line runs continuously across the whole bar, and each
+cell has a 1-pixel inset gap just inside that border for a more
+loading-bar-like look - `-` marks an empty cell, which is not blank space,
+the bar's boundary stays visible at any fill level, including 0%. The
+bar's actual resolution is finer than whole cells - see below. The
+trailing ✳ on row 2 only shows up if it fits after everything else -
+attached directly on the 5H screen, two cells back on the WK screen. A
+third, combined "both at a glance" screen exists in the code but is
+disabled for now - `SCREEN_COUNT` in `main.cpp`.)
 
 - **5H** - utilization of your rolling 5-hour session limit, with a
-  countdown to when it resets
+  countdown to when it resets ("3h 5m", not "3h 05m" - minutes aren't
+  zero-padded; under an hour left, the hour part disappears entirely -
+  "45m Left", not "0h 45m Left").
 - **WK** - utilization of your rolling 7-day (week) limit, with the
   weekday + time it resets (a countdown in hours is less readable for a
   multi-day window). Shown in `DISPLAY_TZ_OFFSET_SEC`'s timezone in
   `main.cpp` - hardcoded to KST (UTC+9) for this build; change that
   constant if you're building for a different timezone.
-- The third, combined screen has both at a glance, compactly - no bar
-  graphs (no room) and no stale/`!` marker, just the numbers. Check the
-  dedicated 5H/WK screens if you need those.
 - The bar itself has finer-than-one-cell resolution (`BAR_SUBDIV` in
   `main.cpp`, 5 sub-steps per cell) using a few extra custom characters,
-  not just filled/empty blocks - and unfilled cells show a bordered
-  outline instead of going blank, so the bar's full width stays visible
-  even at 0%.
+  not just filled/empty blocks.
 - A trailing `!` on row 2 means the device hasn't gotten a good reading in
   a while (WiFi hiccup, API timeout, etc.) - the last known values stay on
   screen.
@@ -146,6 +152,30 @@ whole cells - see below.)
 Polling happens every 2 minutes by default (`REFRESH_INTERVAL_MS` in
 `main.cpp`) since each check is a real, though minimal, API call - there's
 no need to hit it every few seconds.
+
+## Debug mode
+
+If the debug button is wired (GPIO21), pressing it runs a ~25-second
+on-screen self-test using the real rendering code - no need to wait for
+live usage data or the calendar/clock to naturally pass through every
+value:
+
+1. Sweeps the bar through every percentage 0-99, so you can eyeball the
+   fill/partial-fill/empty-cell glyphs across the whole range. Lingers on
+   0% for 3 seconds first so that frame is actually visible before the
+   sweep starts moving.
+2. Cycles all 7 weekday labels (Mon through Sun) at a fixed time, so you
+   can check the weekday abbreviations render correctly.
+3. Sweeps the clock display from 00:00 up through 24:00, one hour at a
+   time, so every two-digit hour renders correctly (24:00 is included as
+   a display-sweep boundary, not a claim that the device ever shows a
+   real 24:00).
+4. Sweeps the minute display from 00 through 59 (hour held at 0), so
+   every two-digit minute renders correctly too - the hour sweep above
+   only ever showed ":00".
+
+Normal operation resumes automatically afterward - nothing is saved or
+changed, it's read-only against the display.
 
 ## Layout tool
 

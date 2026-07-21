@@ -23,23 +23,37 @@
 #define PIN_SDA 4
 #define PIN_SCL 5
 
-// Wiring: one leg to GPIO7, the other to GND. Uses the internal pull-up
-// (no external resistor needed). GPIO6 didn't work on this board (tried
-// first); if GPIO7 also doesn't, try GPIO3 or GPIO10 next - avoid SDA/SCL
-// and strapping pins (GPIO2/8/9 on ESP32-C3).
-#define PIN_SCREEN_BUTTON 7
+// Wiring: one leg to GPIO20, the other to GND. Uses the internal pull-up
+// (no external resistor needed). GPIO6 and GPIO7 were both tried first and
+// didn't respond reliably - see checkScreenButton()'s comment for why that
+// was actually a polling-rate bug, not a pin problem, so this switch alone
+// probably wasn't the fix. GPIO20 is normally UART0 RX, but this board's
+// Serial goes over native USB-CDC instead (ARDUINO_USB_MODE=1 in
+// platformio.ini), so UART0 is unused and GPIO20 is free.
+#define PIN_SCREEN_BUTTON 20
 #define BUTTON_DEBOUNCE_MS 250UL
 
+// Second button, same wiring style (one leg to GND, internal pull-up) -
+// GPIO21 is UART0 TX, unused for the same reason GPIO20 (UART0 RX) is
+// free. Runs a one-shot visual self-test (runDebugTest()) instead of
+// switching screens: sweeps the bar 0-99% and cycles all 7 weekday
+// labels, so both can be checked by eye without waiting for real usage
+// data to naturally pass through every value.
+#define PIN_DEBUG_BUTTON 21
+
 // This calls the real Anthropic API every poll, so don't hammer it. 120s
-// matches claude-usage-stick's own default (tested range: 30s-300s).
+// matches -usage-stick's own default (tested range: 30s-300s).
 #define REFRESH_INTERVAL_MS 120000UL
 #define HTTP_TIMEOUT_MS 15000UL
 #define STALE_AFTER_MS (3UL * REFRESH_INTERVAL_MS)  // flag data as stale after a few missed polls
 
-// The three screens (5-hour detail, weekly detail, combined glance)
-// alternate on this interval; the button also advances early on demand.
+// Screens alternate on this interval; the button also advances early on
+// demand. SCREEN_COUNT is 2 (5H, WK) - the combined-glance screen
+// (renderCombinedScreen(), currentScreen==2) is implemented but on hold
+// per explicit request; bump this back to 3 to bring it back, nothing
+// else needs to change.
 #define SCREEN_ROTATE_MS 4000UL
-#define SCREEN_COUNT 3
+#define SCREEN_COUNT 2
 
 // Width, in LCD cells, of the usage bar on row 0 - scales to use every
 // column: row 0 is "<label> <bar> <logo>", i.e. 2 (label) + 1 (gap) +
@@ -73,27 +87,48 @@
 LiquidCrystal_I2C *lcd = nullptr;
 Esp32WifiFix wifiFix;
 
-// CGRAM has 8 slots (0-7), all spoken for: 0 (full) + 1-4 (partial fill,
-// 1-4 of 5 columns lit - see BAR_SUBDIV) + 5 (decorative sparkle, boot
-// splash + detail-screen row 0) + 6 (bordered empty cell, so a 0%-filled
-// bar still shows a visible slot outline instead of going totally blank).
-// 7 is the last free one.
+// CGRAM has 8 slots (0-7), 1 free (7): 0 (full) + 1-4 (partial fill, 1-4
+// of 5 columns lit - see BAR_SUBDIV) + 5 (decorative sparkle, boot splash
+// + detail-screen row 0/1) + 6 (empty-cell top/bottom guide line, used
+// uniformly for every empty cell - no special first/last-cell treatment;
+// an earlier version gave the bar's last cell its own bracket-shaped
+// end-cap glyph, but that needed a 9th slot to also add a matching
+// start-cap for the first cell, which doesn't exist - simplified back to
+// one glyph for all empty cells on request instead of sacrificing
+// something else (the logo, bar resolution, or this border consistency
+// itself) to make room).
+// FULL_BLOCK_CHAR briefly moved to the HD44780 ROM's built-in solid
+// block (0xFF, no CGRAM slot needed on ROM code A00) - moved back to
+// CGRAM so it could get the same rows-1/6 inset treatment as the other
+// glyphs below; a ROM glyph's bit pattern can't be customized, so the
+// two goals (free a slot vs. consistent look) were mutually exclusive,
+// and consistent look won out on request.
 static const byte FULL_BLOCK_CHAR = 0;
 static const byte LOGO_CHAR = 5;
-static const byte EMPTY_CELL_CHAR = 6;
+static const byte EMPTY_MID_CHAR = 6;
 // PARTIAL_FILL_CHARS[i] = the glyph for (i+1) of BAR_SUBDIV columns lit,
 // i.e. index 0..3 -> CGRAM slots 1..4 (5/5 lit reuses FULL_BLOCK_CHAR
 // instead of a 5th glyph, since that's already an all-columns-lit block).
 static const byte PARTIAL_FILL_CHARS[BAR_SUBDIV - 1] = {1, 2, 3, 4};
 
+// Same border+inset treatment as the partial-fill glyphs below: rows 0/7
+// are the continuous top/bottom border, rows 1/6 are the blank inset gap,
+// and rows 2-5 (the "content") are solid since this represents 100% full.
 static byte fullBlockGlyph[8] = {
-    0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111,
+    0b11111, 0b00000, 0b11111, 0b11111, 0b11111, 0b11111, 0b00000, 0b11111,
 };
+
+// Row 0 and row 7 are the border (full-width, matching FULL_BLOCK_CHAR
+// and the empty-cell glyphs below, so the bar's top/bottom line runs
+// continuously across every cell regardless of fill state); rows 1 and 6
+// are always left blank as a one-pixel inset gap, with the actual fill
+// indicator confined to rows 2-5 - a "recessed/framed" look, closer to a
+// loading-bar style than a flat block flush against its own border.
 static byte partialFillGlyphs[BAR_SUBDIV - 1][8] = {
-    {0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000},
-    {0b11000, 0b11000, 0b11000, 0b11000, 0b11000, 0b11000, 0b11000, 0b11000},
-    {0b11100, 0b11100, 0b11100, 0b11100, 0b11100, 0b11100, 0b11100, 0b11100},
-    {0b11110, 0b11110, 0b11110, 0b11110, 0b11110, 0b11110, 0b11110, 0b11110},
+    {0b11111, 0b00000, 0b10000, 0b10000, 0b10000, 0b10000, 0b00000, 0b11111},
+    {0b11111, 0b00000, 0b11000, 0b11000, 0b11000, 0b11000, 0b00000, 0b11111},
+    {0b11111, 0b00000, 0b11100, 0b11100, 0b11100, 0b11100, 0b00000, 0b11111},
+    {0b11111, 0b00000, 0b11110, 0b11110, 0b11110, 0b11110, 0b00000, 0b11111},
 };
 // An original decorative sparkle/starburst, not a reproduction of any
 // company's actual logo (5x8 monochrome pixels can't meaningfully
@@ -101,10 +136,12 @@ static byte partialFillGlyphs[BAR_SUBDIV - 1][8] = {
 static byte logoGlyph[8] = {
     0b01010, 0b00100, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0b00100,
 };
-// A hollow rectangle - top/bottom border plus side rails, empty middle -
-// so an empty bar cell reads as "an empty slot" rather than truly blank.
-static byte emptyCellGlyph[8] = {
-    0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111,
+// Just a top and bottom line, no sides - marks the bar's height without
+// boxing in every empty cell. Used for every empty cell uniformly,
+// including the bar's first and last cells - see the CGRAM comment above
+// for why there's no separate bracket-shaped cap for those positions.
+static byte emptyMidGlyph[8] = {
+    0b11111, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111,
 };
 
 int sessionUtilization = -1;  // 5-hour usage %, -1 = no data yet
@@ -115,9 +152,9 @@ bool dataStale = true;
 bool authFailed = false;
 unsigned long lastContactMs = 0;
 
-// The display cycles through 3 screens automatically, or on demand via
-// PIN_SCREEN_BUTTON (checkScreenButton()) - see readai.md.
-int currentScreen = 0;  // 0 = 5H detail, 1 = WK detail, 2 = combined glance
+// The display cycles through SCREEN_COUNT screens automatically, or on
+// demand via PIN_SCREEN_BUTTON (checkScreenButton()) - see readai.md.
+int currentScreen = 0;  // 0 = 5H detail, 1 = WK detail, 2 = combined glance (currently unused, SCREEN_COUNT=2)
 unsigned long lastScreenSwitchMs = 0;
 
 // Tracks what's currently on screen so we only touch the I2C bus when
@@ -186,9 +223,12 @@ uint8_t scanForLcdAddress() {
 
 // Draws a fixed BAR_WIDTH-cell bar starting at (col, row) with BAR_SUBDIV
 // levels of resolution per cell (partial-fill glyphs for the one cell
-// straddling the fill boundary, full/bordered-empty for the rest). Always
-// paints every cell in that range, so a shrinking percentage can't leave
-// stale filled cells behind from a previous, larger reading.
+// straddling the fill boundary, full/empty for the rest). Always paints
+// every cell in that range, so a shrinking percentage can't leave stale
+// filled cells behind from a previous, larger reading. Every empty cell
+// (first, middle, or last) uses the same EMPTY_MID_CHAR (just a
+// top/bottom line) - no special bracket-shaped cap on the bar's edges;
+// see the CGRAM comment near EMPTY_MID_CHAR for why.
 void drawBar(int row, int col, int percent) {
   percent = constrain(percent, 0, 100);
   int filledUnits = (percent * BAR_WIDTH * BAR_SUBDIV + 50) / 100;
@@ -196,7 +236,7 @@ void drawBar(int row, int col, int percent) {
   for (int i = 0; i < BAR_WIDTH; i++) {
     int cellUnits = filledUnits - i * BAR_SUBDIV;
     if (cellUnits <= 0) {
-      lcd->write(EMPTY_CELL_CHAR);
+      lcd->write(EMPTY_MID_CHAR);
     } else if (cellUnits >= BAR_SUBDIV) {
       lcd->write(FULL_BLOCK_CHAR);
     } else {
@@ -236,7 +276,17 @@ void formatCountdown(char *out, size_t outSize, time_t resetEpoch) {
     snprintf(out, outSize, "--");
     return;
   }
-  snprintf(out, outSize, "%ldH%02ldM", remain / 3600, (remain % 3600) / 60);
+  // Lowercase with a space ("4h 5m") rather than "4H5M" - reads more like
+  // ordinary text at a glance. Minutes still aren't zero-padded ("4h 5m",
+  // not "4h 05m"). Once under an hour left, the hour part is dropped
+  // entirely ("5m", not "0h 5m") rather than showing a zero hour count.
+  long hours = remain / 3600;
+  long mins = (remain % 3600) / 60;
+  if (hours == 0) {
+    snprintf(out, outSize, "%ldm", mins);
+  } else {
+    snprintf(out, outSize, "%ldh %ldm", hours, mins);
+  }
 }
 
 // "Fri 19:00" - absolute weekday+time in DISPLAY_TZ_OFFSET_SEC (Seoul), for
@@ -368,11 +418,102 @@ void render() {
   char row1[LCD_COLS + 1];
   snprintf(row1, sizeof(row1), "%s %s%s", pctStr, detail, dataStale && percent >= 0 ? "!" : "");
 
+  // Tack the sparkle on at the very end, but only if it actually fits -
+  // on this device's 18-col LCD it always does (worst case for WK:
+  // "100% Fri 19:00!" is 15 chars, +2 gap +1 logo = 18 exactly), but this
+  // stays correct on a narrower LCD_COLS build too by just skipping the
+  // decoration instead of truncating real content. 5H attaches it
+  // directly against "Left" (no gap); WK sits 2 cells back from the
+  // time, so the two screens don't look identical in how tightly the
+  // sparkle sits (widened from 1 to 2 cells on request).
+  int logoGap = (currentScreen == 0) ? 0 : 2;
+  size_t row1Len = strlen(row1);
+  if (row1Len + logoGap + 1 <= (size_t)LCD_COLS) {
+    size_t pos = row1Len;
+    for (int g = 0; g < logoGap; g++) row1[pos++] = ' ';
+    row1[pos++] = (char)LOGO_CHAR;
+    row1[pos] = '\0';
+  }
+
   if (LCD_ROWS > 1 && strcmp(row1, renderedRow1) != 0) {
     lcdPrintRow(1, row1);
     strncpy(renderedRow1, row1, LCD_COLS);
     renderedRow1[LCD_COLS] = '\0';
   }
+}
+
+// One-shot visual self-test, triggered by PIN_DEBUG_BUTTON: sweeps the
+// real drawBar() through every percentage 0-99, cycles all 7 weekday
+// labels, sweeps the hour display 00:00-24:00, then sweeps the minute
+// display 00-59 (hour held at 0) - so all four can be checked by eye on
+// the actual hardware without waiting for live usage data or the real
+// calendar/clock to happen to pass through every value. Blocking (like
+// connectWiFi()'s diagnostic screens) - normal operation resumes right
+// after via forceRedraw().
+void runDebugTest() {
+  lcd->clear();
+  lcd->setCursor(0, 0);
+  lcd->print("DEBUG: bar 0-99%");
+  delay(600);
+
+  for (int p = 0; p <= 99; p++) {
+    lcd->setCursor(0, 0);
+    lcd->print("5H ");
+    drawBar(0, 3, p);
+    char row1[LCD_COLS + 1];
+    snprintf(row1, sizeof(row1), "test %d%%", p);
+    lcdPrintRow(1, row1);
+    // Linger on the very first (0%, all-empty) frame so it's actually
+    // visible before the sweep starts moving, instead of flashing by at
+    // the same 120ms pace as every other step.
+    delay(p == 0 ? 3000 : 120);
+  }
+
+  lcd->clear();
+  lcd->setCursor(0, 0);
+  lcd->print("DEBUG: weekdays");
+  delay(600);
+
+  static const char *wdays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  static const int mondayFirst[] = {1, 2, 3, 4, 5, 6, 0};  // Mon..Sun, matching how the user asked for it
+  for (int i = 0; i < 7; i++) {
+    char row1[LCD_COLS + 1];
+    snprintf(row1, sizeof(row1), "%s 19:00", wdays[mondayFirst[i]]);
+    lcdPrintRow(1, row1);
+    delay(500);
+  }
+
+  lcd->clear();
+  lcd->setCursor(0, 0);
+  lcd->print("DEBUG: 00-24h");
+  delay(600);
+
+  // Hour 24 is included as its own step (not wrapped to "00:00" the next
+  // day) since this is a display sweep, not a real clock - the point is
+  // seeing every two-digit hour value render, including that boundary.
+  for (int h = 0; h <= 24; h++) {
+    char row1[LCD_COLS + 1];
+    snprintf(row1, sizeof(row1), "%02d:00", h);
+    lcdPrintRow(1, row1);
+    delay(150);
+  }
+
+  lcd->clear();
+  lcd->setCursor(0, 0);
+  lcd->print("DEBUG: 00-59m");
+  delay(600);
+
+  // Hour held at 0 - the hour sweep above already covered every hour
+  // value, so this phase isolates the minute digits (00-59) instead.
+  for (int m = 0; m <= 59; m++) {
+    char row1[LCD_COLS + 1];
+    snprintf(row1, sizeof(row1), "00:%02d", m);
+    lcdPrintRow(1, row1);
+    delay(100);
+  }
+
+  lcd->clear();
+  forceRedraw();
 }
 
 void connectWiFi() {
@@ -536,6 +677,7 @@ void setup() {
   Serial.begin(115200);
   Wire.begin(PIN_SDA, PIN_SCL);
   pinMode(PIN_SCREEN_BUTTON, INPUT_PULLUP);
+  pinMode(PIN_DEBUG_BUTTON, INPUT_PULLUP);
 
   uint8_t lcdAddress = scanForLcdAddress();
   Serial.printf("LCD I2C address: 0x%02X\n", lcdAddress);
@@ -548,11 +690,17 @@ void setup() {
     lcd->createChar(PARTIAL_FILL_CHARS[i], partialFillGlyphs[i]);
   }
   lcd->createChar(LOGO_CHAR, logoGlyph);
-  lcd->createChar(EMPTY_CELL_CHAR, emptyCellGlyph);
+  lcd->createChar(EMPTY_MID_CHAR, emptyMidGlyph);
 
   lcd->setCursor(0, 0);
-  lcd->print("Claude ");
+  // write() (raw byte -> CGRAM code) for the logo, print() (formats its
+  // argument) for the string - not interchangeable here: print(LOGO_CHAR)
+  // would print the literal digit "5" instead of the sparkle, since
+  // LiquidCrystal_I2C's print(unsigned char) formats it as a number; and
+  // this library's write() only accepts a single uint8_t, not a string,
+  // so print() is the only option for "Claude ".
   lcd->write(LOGO_CHAR);
+  lcd->print(" Claude ");
   if (LCD_ROWS > 1) {
     lcd->setCursor(0, 1);
     lcd->print("Desktop Display");
@@ -585,7 +733,8 @@ unsigned long lastFetchAttemptMs = 0;
 // Standard Arduino debounce pattern: the raw pin reading has to sit still
 // for BUTTON_DEBOUNCE_MS before a change counts, so switch bounce doesn't
 // register as multiple presses. PIN_SCREEN_BUTTON is INPUT_PULLUP, so a
-// press reads LOW.
+// press reads LOW. This only works if loop() calls this often enough to
+// actually catch a tap - see the delay(20) note at the bottom of loop().
 int buttonDebouncedState = HIGH;
 int buttonLastReading = HIGH;
 unsigned long buttonLastChangeMs = 0;
@@ -606,6 +755,24 @@ void checkScreenButton() {
   buttonLastReading = reading;
 }
 
+int debugButtonDebouncedState = HIGH;
+int debugButtonLastReading = HIGH;
+unsigned long debugButtonLastChangeMs = 0;
+
+void checkDebugButton() {
+  int reading = digitalRead(PIN_DEBUG_BUTTON);
+  if (reading != debugButtonLastReading) {
+    debugButtonLastChangeMs = millis();
+  }
+  if (millis() - debugButtonLastChangeMs > BUTTON_DEBOUNCE_MS && reading != debugButtonDebouncedState) {
+    debugButtonDebouncedState = reading;
+    if (debugButtonDebouncedState == LOW) {
+      runDebugTest();
+    }
+  }
+  debugButtonLastReading = reading;
+}
+
 void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
@@ -621,6 +788,7 @@ void loop() {
   }
 
   checkScreenButton();
+  checkDebugButton();
 
   if (millis() - lastScreenSwitchMs >= SCREEN_ROTATE_MS) {
     currentScreen = (currentScreen + 1) % SCREEN_COUNT;
@@ -629,5 +797,14 @@ void loop() {
   }
 
   render();
-  delay(1000);
+  // Was delay(1000): everything above is already millis()-gated to its own
+  // interval (fetch/stale/rotate all check real elapsed time, not "how many
+  // loop iterations"), so that didn't rate-limit them - it just meant
+  // checkScreenButton() only sampled the pin once a second. A tap shorter
+  // than that window (i.e., basically any normal tap) landed entirely
+  // between two samples and was never seen at all - this, not the GPIO
+  // choice, is almost certainly why the button "didn't work well" before.
+  // 20ms keeps the button responsive; render()'s own change-detection
+  // means calling it this much more often doesn't add real I2C traffic.
+  delay(20);
 }

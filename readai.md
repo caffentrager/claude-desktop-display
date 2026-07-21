@@ -49,18 +49,38 @@ setup/wiring/troubleshooting.
   as a normal C string; row 1 is plain text, tracked in `renderedRow1` the
   straightforward way.
 
-## Display: 3 screens (5H, WK, combined glance), button-switchable
+## Display: 2 active screens (5H, WK) + a held combined screen, button-switchable
 
-The LCD cycles through 3 screens (`currentScreen`, 0/1/2), advancing every
-`SCREEN_ROTATE_MS` from `loop()` **or** on a press of `PIN_SCREEN_BUTTON`
-(debounced in `checkScreenButton()`, standard Arduino debounce pattern -
-raw reading must sit still for `BUTTON_DEBOUNCE_MS` before it counts).
-A button press also resets `lastScreenSwitchMs`, so the automatic timer
-doesn't immediately advance again right on top of a manual one. Note the
-button is only polled once per `loop()` iteration, which ends in
-`delay(1000)` - so there's up to ~1s + `BUTTON_DEBOUNCE_MS` latency between
-a press and the screen changing; this is a deliberate non-goal (nothing
-about this device is latency-sensitive) not an overlooked bug.
+`SCREEN_COUNT` is 2 as of 2026-07-21 - the combined-glance screen (see
+below) is fully implemented but disabled per explicit user request
+("일단 보류" - hold for now, not deleted). Bump `SCREEN_COUNT` back to 3
+to bring it back; nothing else needs to change.
+
+The LCD cycles through `SCREEN_COUNT` screens (`currentScreen`), advancing
+every `SCREEN_ROTATE_MS` from `loop()` **or** on a press of
+`PIN_SCREEN_BUTTON` (debounced in `checkScreenButton()`, standard Arduino
+debounce pattern - raw reading must sit still for `BUTTON_DEBOUNCE_MS`
+before it counts). A button press also resets `lastScreenSwitchMs`, so the
+automatic timer doesn't immediately advance again right on top of a
+manual one.
+
+**Bug history worth knowing:** an earlier version of `loop()` ended in
+`delay(1000)`, and `checkScreenButton()` (called once per iteration) was
+mis-documented here as having "up to ~1s latency... a deliberate
+non-goal, not a bug." That was wrong - it wasn't just latency, it was
+actual **missed presses**: any tap shorter than the ~1s window between
+`digitalRead()` samples (i.e., basically any normal human tap) could land
+entirely between two samples and never be seen at all, which is almost
+certainly the real reason the user reported "버튼이 잘 안 먹음" (button
+doesn't respond well). Fixed by changing the loop's trailing `delay(1000)`
+to `delay(20)` - everything else in `loop()` (fetch interval, staleness,
+screen rotation) was already gated on its own `millis()` comparison, not
+on "how many loop iterations passed," so shortening the delay only speeds
+up button polling; it doesn't need a companion "run this every 1s
+instead" timer for the rest, and `render()`'s own I2C change-detection
+means calling it ~50x more often than before doesn't add real I2C
+traffic. **If a button issue ever comes back, check this class of bug
+before assuming it's the GPIO pin.**
 
 Screens 0/1 ("5H"/"WK" detail, designed with `lcd_editor.html` - see
 below) are each 2 rows:
@@ -71,12 +91,25 @@ below) are each 2 rows:
   (2 + 1 + BAR_WIDTH + 1 + 1) always totals exactly `LCD_COLS` - the bar
   fills whatever's left over instead of leaving unused columns, whatever
   LCD_COLS is set to.
-- Row 1: the exact percentage as a number, plus a time detail:
-  - Screen 0 ("5H"): `formatCountdown()` - a relative "3H12M" countdown to
-    when the 5-hour window resets (screen 0's `render()` branch appends
-    " Left" itself; `formatCountdown()`'s raw output has no suffix so
-    screen 2 can reuse it without one - see below). Relative reads better
-    for a short window.
+- Row 1: the exact percentage as a number, plus a time detail, plus the
+  same sparkle again at the very end *if it fits* (`render()` measures
+  `strlen(row1)` and only appends `LOGO_CHAR` (plus 2 leading spaces on
+  screen 1 only, 0 on screen 0 - see the CGRAM slot-5 note below) when it
+  fits - on this device's 18-col LCD it always does, exactly: screen 0's
+  worst case "100% 6h 59m Left!" is 17 chars + 0 gap + 1 logo = 18;
+  screen 1's worst case "100% Fri 19:00!" is 15 chars + 2 gap + 1 logo =
+  18. This degrades gracefully instead of truncating real content on a
+  narrower `LCD_COLS`, though):
+  - Screen 0 ("5H"): `formatCountdown()` - a relative "3h 5m" countdown to
+    when the 5-hour window resets (lowercase with a space, not "3H5M" -
+    reads more like ordinary text; minutes still aren't zero-padded -
+    "3h 5m" not "3h 05m", changed on request since the leading zero read
+    as harder to scan; under an hour left, the hour part is dropped
+    entirely - "45m", not "0h 45m" - rather than showing a zero hour
+    count; screen 0's `render()` branch appends " Left" itself;
+    `formatCountdown()`'s raw output has no suffix so screen 2 can reuse
+    it without one - see below). Relative reads better for a short
+    window.
   - Screen 1 ("WK"): `formatResetDay()` - an absolute "Fri 19:00" (weekday
     + time, shifted by `DISPLAY_TZ_OFFSET_SEC`) for when the 7-day window
     resets. Absolute reads better than a multi-day countdown.
@@ -86,8 +119,9 @@ below) are each 2 rows:
     `gmtime_r()`, not `resetEpoch` itself, so it can't skew
     `formatCountdown()`'s duration math (which stays pure UTC-vs-UTC).
 
-Screen 2 (`renderCombinedScreen()`) shows both metrics on one screen, no
-rotation needed for a quick glance: `"5H<pct> <countdown>"` /
+Screen 2 (`renderCombinedScreen()`, currently unreachable - see
+`SCREEN_COUNT` above) shows both metrics on one screen, no rotation
+needed for a quick glance: `"5H<pct> <countdown>"` /
 `"WK<pct> <resetday>"`. Two things worth knowing if you touch this:
 - **No space between the label and percent** (`"5H100%"`, not
   `"5H 100%"`) - deliberate, not a typo. With the space, `"WK100% Fri
@@ -100,23 +134,58 @@ rotation needed for a quick glance: `"5H<pct> <countdown>"` /
 - No bar graphs (no room) and no stale/`!` marker - this screen trades
   those for compactness; check the dedicated screens for that detail.
 
-CGRAM (8 slots, 0-7) is now down to 1 free slot:
-- 0: full-block (`FULL_BLOCK_CHAR`) - bar cells that are completely filled.
+CGRAM (8 slots, 0-7) has 1 free slot (7). The full allocation history is
+worth knowing since it moved around twice in one session:
+- 0: `FULL_BLOCK_CHAR`. Briefly moved to the HD44780 ROM's built-in solid
+  block (`0xFF`, no CGRAM slot needed on ROM code A00 - what the large
+  majority of PCF8574-backed character LCDs ship with) to free up a slot,
+  then moved *back* to CGRAM once the bar cells got the rows-1/6 inset
+  redesign (below) - a ROM glyph's bit pattern can't be customized, so
+  "free a slot" and "give every cell state a consistent look" turned out
+  to be mutually exclusive, and consistent look won on request. If this
+  is ever ported to a board with a non-A00 ROM variant (A02, European, is
+  the other common one), `0xFF` may not be a solid block there - not a
+  concern now since it's back in CGRAM, but relevant if anyone reverts
+  this again.
 - 1-4: partial-fill glyphs (`PARTIAL_FILL_CHARS`, 1-4 of `BAR_SUBDIV`=5
   columns lit) - only the one bar cell straddling the fill boundary ever
   uses one of these; `drawBar()` computes `filledUnits` in units of
   1/`BAR_SUBDIV` of a cell rather than whole cells, for
   `BAR_WIDTH * BAR_SUBDIV` distinct bar levels instead of just `BAR_WIDTH`.
+  Rows 0 and 7 are full-width (`0b11111`), matching `FULL_BLOCK_CHAR` and
+  `EMPTY_MID_CHAR`, so the bar's top/bottom border runs continuously
+  across every cell regardless of fill state. Rows 1 and 6 are always
+  blank (a 1px inset gap just inside that border), with the actual fill
+  columns confined to rows 2-5 - a "recessed/framed" look requested to
+  read more like a loading bar.
 - 5: `LOGO_CHAR`, a small original sparkle/starburst (not a reproduction
   of any real logo - 5x8 monochrome pixels can't meaningfully do that
   anyway), shown on the boot splash (`"Claude <sparkle>"` / `"Desktop
-  Display"`, two rows, in `setup()` before WiFi connects) and at the end
-  of row 0 on screens 0/1.
-- 6: `EMPTY_CELL_CHAR`, a hollow-rectangle outline - `drawBar()` writes
-  this instead of a plain space for any cell with 0 units filled, so the
-  bar's full width (its "empty slot" boundary) stays visible even at 0%,
-  not just once something's filled.
-- 7: the last free slot.
+  Display"`, two rows, in `setup()` before WiFi connects), at the end of
+  row 0 on screens 0/1 (always fits, since `BAR_WIDTH` is sized to leave
+  exactly enough room for it), and at the end of row 1 too if there's
+  space left over (see the row 1 note above) - attached directly (no
+  gap) on screen 0, 2 cells of gap on screen 1 (widened from 1 on
+  request), so the two screens don't look identical in how tightly it
+  sits against the preceding text.
+- 6: `EMPTY_MID_CHAR` - just a top/bottom line, no sides. **Used for
+  every empty bar cell uniformly, including the first and last cells -
+  no special bracket-shaped end-cap.** This went through two redesigns in
+  one session: a full hollow-rectangle outline (top+bottom+both sides)
+  on every empty cell was judged too heavy, then a version with a
+  dedicated bracket-shaped end-cap glyph (`EMPTY_END_CHAR`, a mirrored
+  Korean "ㄷ"/"⊐" shape, used only for `i == BAR_WIDTH - 1`) was tried for
+  visual symmetry with the bar's edges - but adding a matching *start*-cap
+  for the first cell too would have needed a 9th CGRAM slot (only 8
+  exist), forcing a tradeoff against the logo, `BAR_SUBDIV` resolution, or
+  this glyph's own border continuity. Asked the user, who instead chose
+  the simplest option not on the original list: drop the dedicated
+  end-cap entirely and use this same top/bottom-only glyph everywhere,
+  first/middle/last cells alike. `EMPTY_END_CHAR` and its `emptyEndGlyph`
+  array no longer exist in the code - don't reintroduce them without
+  re-confirming, since this was an explicit simplification, not an
+  oversight.
+- 7: free.
 
 This depends on two things that didn't exist before this design:
 
@@ -204,14 +273,46 @@ This is the part most likely to surprise a future reader:
 - `REFRESH_INTERVAL_MS` (120s) hits the real Anthropic Messages API every
   poll - don't lower this aggressively, it's a real (if minimal,
   `max_tokens=1`) request against production rate limits.
-- `PIN_SCREEN_BUTTON` is GPIO7. GPIO6 was tried first (also chosen to
-  avoid ESP32-C3's strapping pins GPIO2/8/9 - GPIO9 in particular is the
-  same pin as the BOOT button on most boards) but didn't work on this
-  device's actual board for reasons not root-caused (could be a
-  board-specific pinout difference, could be wiring - not confirmed
-  either way); switched to GPIO7 on the user's instruction rather than
-  debugging further. If GPIO7 ever needs to change again, GPIO3 or GPIO10
-  are the next things to try - avoid SDA/SCL and the strapping pins.
+- `PIN_SCREEN_BUTTON` history: GPIO6 → GPIO7 → GPIO20, in that order, all
+  within 2026-07-21. GPIO6 and GPIO7 were each reported as "doesn't work
+  well" and swapped out without root-causing why at the time - **the real
+  bug turned out to be unrelated to the pin choice** (see the `loop()`
+  polling-rate bug in the Display section above: any of these three pins
+  would have shown the same symptom, since the actual problem was
+  `checkScreenButton()` only being sampled once a second). GPIO20 is what
+  shipped. `PIN_DEBUG_BUTTON` (GPIO21, added same day) shares the same
+  debounce pattern in its own `checkDebugButton()`/state variables rather
+  than reusing `checkScreenButton()`'s - simple duplication rather than a
+  shared helper, since there are only two of these and they trigger
+  different actions. Both GPIO20/21 are normally UART0 RX/TX - fine here
+  since Serial goes over native USB-CDC instead (`ARDUINO_USB_MODE=1` in
+  `platformio.ini`), but worth knowing if this code is ever adapted for a
+  board/config that uses the classic UART0. If either ever needs to
+  change again, prefer another free, non-strapping, non-SDA/SCL pin
+  (GPIO2/8/9 are ESP32-C3's strapping pins).
+- `runDebugTest()` (triggered by `PIN_DEBUG_BUTTON`) is a blocking ~25s,
+  4-phase self-test:
+  1. Sweeps `drawBar()` through percent 0-99 (120ms/step), lingering 3s
+     on the p==0 frame first so the all-empty state is actually visible
+     before the sweep starts moving rather than flashing by at the same
+     pace as every other step.
+  2. Cycles all 7 weekday abbreviations through the same `"%s HH:MM"`
+     format `formatResetDay()` uses (hardcoded to a fixed time, not run
+     through `formatResetDay()` itself, since driving that function
+     through all 7 weekdays would need 7 fake epoch values - simpler to
+     just test the display format directly).
+  3. Sweeps the clock display `"%02d:00"` from hour 0 through 24
+     inclusive (150ms/step) - 24 is included deliberately as a
+     display-sweep boundary (checking the two-digit format renders for
+     every value), not a claim the device ever shows a real "24:00".
+  4. Sweeps `"00:%02d"` from minute 0 through 59 (100ms/step), hour held
+     at 0 - phase 3 only ever showed ":00", so this is the other half of
+     the two-digit range that phase needed but didn't cover.
+
+  Exists so the full range of all four can be eyeballed on the real
+  hardware without waiting for live usage data or the real calendar/clock
+  to naturally pass through every value. Ends with `forceRedraw()` so
+  normal operation resumes cleanly.
 
 ## Naming note
 
